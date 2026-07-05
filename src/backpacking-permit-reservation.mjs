@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -13,6 +14,7 @@ const PROFILE_DIR = path.resolve(RUNTIME_DIR, "browser-profile");
 const DIAGNOSTIC_DIR = path.resolve(RUNTIME_DIR, "diagnostics");
 const HANDOFF_FILE = path.resolve(RUNTIME_DIR, "handoff-url.txt");
 const DEFAULT_RUN_TIME_ZONE = "America/Los_Angeles";
+const FIELD_RESOLUTION_CACHE = new WeakMap();
 
 const FACILITIES = {
   yosemite: {
@@ -264,6 +266,68 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForCondition(check, { timeoutMs, intervalMs = 100 }) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    const result = await check();
+    if (result) {
+      return result;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return null;
+    }
+
+    await sleep(Math.min(intervalMs, remainingMs));
+  }
+}
+
+function createTimingTracker() {
+  const marks = new Map([["start", performance.now()]]);
+
+  return {
+    mark(name) {
+      marks.set(name, performance.now());
+    },
+    has(name) {
+      return marks.has(name);
+    },
+    durationMs(startName, endName) {
+      const start = marks.get(startName);
+      const end = marks.get(endName);
+      if (typeof start !== "number" || typeof end !== "number") {
+        return null;
+      }
+      return Math.max(0, end - start);
+    },
+    elapsedSince(startName) {
+      const start = marks.get(startName);
+      if (typeof start !== "number") {
+        return null;
+      }
+      return Math.max(0, performance.now() - start);
+    },
+  };
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) {
+    return "n/a";
+  }
+
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+
+  if (ms < 10000) {
+    return `${(ms / 1000).toFixed(2)} s`;
+  }
+
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
 async function ensureDir(dirPath) {
   await fs.mkdir(dirPath, { recursive: true });
 }
@@ -456,6 +520,27 @@ function buildColumnHeaderLabel(entryDate) {
     year: "numeric",
     timeZone: "UTC",
   });
+}
+
+function matchesExpectedUrl(currentUrl, expectedUrl) {
+  try {
+    const current = new URL(currentUrl);
+    const expected = new URL(expectedUrl);
+
+    if (current.origin !== expected.origin || current.pathname !== expected.pathname) {
+      return false;
+    }
+
+    for (const [key, value] of expected.searchParams.entries()) {
+      if (current.searchParams.get(key) !== value) {
+        return false;
+      }
+    }
+
+    return true;
+  } catch {
+    return currentUrl === expectedUrl;
+  }
 }
 
 async function prompt(question, defaultValue = "") {
@@ -986,6 +1071,23 @@ async function isVisible(locator) {
   return await locator.isVisible().catch(() => false);
 }
 
+function getFieldResolutionCache(page) {
+  const currentUrl = page.url();
+  const cached = FIELD_RESOLUTION_CACHE.get(page);
+
+  if (cached && cached.url === currentUrl) {
+    return cached;
+  }
+
+  const next = {
+    url: currentUrl,
+    controlInventory: null,
+    locators: new Map(),
+  };
+  FIELD_RESOLUTION_CACHE.set(page, next);
+  return next;
+}
+
 async function resolveStrategyLocator(page, strategy) {
   if (strategy.kind === "label") {
     return page.getByLabel(strategy.text, { exact: strategy.exact });
@@ -1018,7 +1120,12 @@ async function findDirectLocator(page, config) {
 }
 
 async function getFormControlInventory(page) {
-  return await page.evaluate(() => {
+  const cache = getFieldResolutionCache(page);
+  if (cache.controlInventory) {
+    return cache.controlInventory;
+  }
+
+  cache.controlInventory = await page.evaluate(() => {
     const elements = Array.from(
       document.querySelectorAll(
         'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="checkbox"], [role="radio"]'
@@ -1118,6 +1225,8 @@ async function getFormControlInventory(page) {
       })
       .filter(Boolean);
   });
+
+  return cache.controlInventory;
 }
 
 function scoreControl(control, config) {
@@ -1183,12 +1292,30 @@ async function findFuzzyLocator(page, config) {
 
 async function resolveFieldLocator(page, fieldKey) {
   const config = FIELD_CONFIG[fieldKey];
+  const cache = getFieldResolutionCache(page);
+  const cachedLocator = cache.locators.get(fieldKey);
+
+  if (cachedLocator) {
+    const count = await cachedLocator.count().catch(() => 0);
+    if (count > 0) {
+      return cachedLocator;
+    }
+
+    cache.locators.delete(fieldKey);
+  }
+
   const direct = await findDirectLocator(page, config);
   if (direct) {
+    cache.locators.set(fieldKey, direct);
     return direct;
   }
 
-  return await findFuzzyLocator(page, config);
+  const fuzzy = await findFuzzyLocator(page, config);
+  if (fuzzy) {
+    cache.locators.set(fieldKey, fuzzy);
+  }
+
+  return fuzzy;
 }
 
 async function getElementMeta(locator) {
@@ -1239,7 +1366,6 @@ async function selectChoiceField(page, fieldKey, value) {
   }
 
   await locator.click();
-  await sleep(500);
 
   const optionCandidates = [
     page.getByRole("option", { name: value, exact: true }),
@@ -1247,12 +1373,13 @@ async function selectChoiceField(page, fieldKey, value) {
     page.getByText(value, { exact: true }),
   ];
 
-  for (const optionLocator of optionCandidates) {
-    const count = await optionLocator.count().catch(() => 0);
-    if (count === 1 && (await isVisible(optionLocator))) {
-      await optionLocator.click();
-      return;
-    }
+  const selectedOption = await waitForCondition(
+    async () => await findVisibleLocator(optionCandidates),
+    { timeoutMs: 2000, intervalMs: 50 }
+  );
+  if (selectedOption) {
+    await selectedOption.click();
+    return;
   }
 
   throw new Error(
@@ -1371,6 +1498,16 @@ async function getVisibleLoginForm(page) {
   };
 }
 
+async function ensureAvailabilityPage(page, request) {
+  const availabilityUrl = request.destination.buildAvailabilityUrl(request.entryDate);
+  if (matchesExpectedUrl(page.url(), availabilityUrl)) {
+    return;
+  }
+
+  console.log("Opening the availability grid...");
+  await page.goto(availabilityUrl, { waitUntil: "domcontentloaded" });
+}
+
 async function submitLoginIfVisible(page, account, reason = "Signing into Recreation.gov...") {
   const loginForm = await getVisibleLoginForm(page);
   if (!loginForm) {
@@ -1382,12 +1519,12 @@ async function submitLoginIfVisible(page, account, reason = "Signing into Recrea
   await loginForm.passwordField.fill(account.password);
   await loginForm.submitButton.click();
 
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    if (!(await getVisibleLoginForm(page))) {
-      return true;
-    }
-    await sleep(500);
+  const dismissed = await waitForCondition(
+    async () => !(await getVisibleLoginForm(page)),
+    { timeoutMs: 20000, intervalMs: 100 }
+  );
+  if (dismissed) {
+    return true;
   }
 
   console.log("");
@@ -1398,7 +1535,7 @@ async function submitLoginIfVisible(page, account, reason = "Signing into Recrea
 }
 
 async function ensureSignedIn(page, request) {
-  await page.goto(request.destination.permitUrl, { waitUntil: "domcontentloaded" });
+  await ensureAvailabilityPage(page, request);
   await page.bringToFront().catch(() => {});
 
   const loginButton = page.getByRole("button", {
@@ -1416,6 +1553,8 @@ async function ensureSignedIn(page, request) {
   if (!submitted) {
     throw new Error("The Recreation.gov login form did not appear after clicking Log In.");
   }
+
+  await ensureAvailabilityPage(page, request);
 }
 
 async function setRadioChoice(page, label) {
@@ -1490,16 +1629,26 @@ async function setGroupSize(page, groupSize) {
     exact: true,
   });
 
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    if (!(await isVisible(infoHeading))) {
-      return;
-    }
-    await sleep(500);
+  const closed = await waitForCondition(
+    async () => !(await isVisible(infoHeading)),
+    { timeoutMs: 15000, intervalMs: 100 }
+  );
+  if (closed) {
+    return;
   }
 }
 
-async function setEntryDate(page, entryDate) {
+async function ensureEntryDate(page, entryDate) {
+  const headerLabel = buildColumnHeaderLabel(entryDate);
+  const matchingHeader = page.getByRole("columnheader", {
+    name: headerLabel,
+    exact: false,
+  });
+
+  if ((await matchingHeader.count().catch(() => 0)) > 0) {
+    return;
+  }
+
   console.log(`Setting entry date to ${entryDate}...`);
   const [year, month, day] = entryDate.split("-");
   const spinbuttons = page.getByRole("spinbutton");
@@ -1518,18 +1667,12 @@ async function setEntryDate(page, entryDate) {
   await yearField.fill(year);
   await yearField.press("Tab").catch(() => {});
 
-  const headerLabel = buildColumnHeaderLabel(entryDate);
-  const matchingHeader = page.getByRole("columnheader", {
-    name: headerLabel,
-    exact: false,
-  });
-
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    if ((await matchingHeader.count().catch(() => 0)) > 0) {
-      return;
-    }
-    await sleep(500);
+  const updated = await waitForCondition(
+    async () => (await matchingHeader.count().catch(() => 0)) > 0,
+    { timeoutMs: 15000, intervalMs: 100 }
+  );
+  if (updated) {
+    return;
   }
 
   throw new Error(`The availability grid did not update to show ${headerLabel}.`);
@@ -1584,15 +1727,11 @@ function findTrailheadRow(entryPointName, inventory, destination) {
 }
 
 async function selectTrailheadByPriority(page, request) {
-  console.log("Opening the availability grid...");
-  await page.goto(request.destination.buildAvailabilityUrl(request.entryDate), {
-    waitUntil: "domcontentloaded",
-  });
-
+  await ensureAvailabilityPage(page, request);
   await prepareAvailabilityGrid(page, request);
-  await setEntryDate(page, request.entryDate);
+  await ensureEntryDate(page, request.entryDate);
   await setGroupSize(page, request.groupSize);
-  await setEntryDate(page, request.entryDate);
+  await ensureEntryDate(page, request.entryDate);
 
   const trailheadInventory = await getTrailheadRowInventory(
     page,
@@ -1636,16 +1775,16 @@ async function selectTrailheadByPriority(page, request) {
 
     await availabilityButton.click();
 
-    const enableDeadline = Date.now() + 5000;
-    while (Date.now() < enableDeadline) {
-      if (await bookNowButton.isEnabled().catch(() => false)) {
-        console.log(`Selected entry point ${matchedTrailhead.displayName}.`);
-        return {
-          ...trailhead,
-          displayName: matchedTrailhead.displayName,
-        };
-      }
-      await sleep(250);
+    const enabled = await waitForCondition(
+      async () => await bookNowButton.isEnabled().catch(() => false),
+      { timeoutMs: 5000, intervalMs: 100 }
+    );
+    if (enabled) {
+      console.log(`Selected entry point ${matchedTrailhead.displayName}.`);
+      return {
+        ...trailhead,
+        displayName: matchedTrailhead.displayName,
+      };
     }
 
     const clearDatesButton = page.getByRole("button", {
@@ -1655,7 +1794,10 @@ async function selectTrailheadByPriority(page, request) {
 
     if (await isVisible(clearDatesButton)) {
       await clearDatesButton.click().catch(() => {});
-      await sleep(500);
+      await waitForCondition(
+        async () => !(await bookNowButton.isEnabled().catch(() => false)),
+        { timeoutMs: 1500, intervalMs: 100 }
+      );
     }
   }
 
@@ -1676,12 +1818,11 @@ async function waitForReservationForm(page, account) {
     "issuingStation",
   ];
 
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
+  const formVisible = await waitForCondition(async () => {
     for (const fieldKey of detectionFields) {
       const locator = await resolveFieldLocator(page, fieldKey);
       if (locator && (await isVisible(locator))) {
-        return;
+        return true;
       }
     }
 
@@ -1691,10 +1832,13 @@ async function waitForReservationForm(page, account) {
       "Recreation.gov requested sign-in before opening permit details. Submitting credentials..."
     );
     if (loginSubmitted) {
-      continue;
+      return false;
     }
 
-    await sleep(750);
+    return false;
+  }, { timeoutMs: 30000, intervalMs: 250 });
+  if (formVisible) {
+    return;
   }
 
   console.log("");
@@ -1715,7 +1859,6 @@ async function continueToDetailsPage(page, account) {
 
   console.log("Opening the reservation details screen...");
   await bookNowButton.click();
-  await sleep(1000);
   await waitForReservationForm(page, account);
 }
 
@@ -1777,7 +1920,42 @@ async function holdForHandoff() {
   await promptEnter("Ready to close the browser");
 }
 
+function logWebsiteInteractionTiming(timing) {
+  if (!timing.has("websiteStart")) {
+    return;
+  }
+
+  console.log("");
+  console.log("Website interaction timing:");
+  console.log(
+    `- Total to handoff: ${formatDuration(
+      timing.durationMs("websiteStart", "handoffReady")
+    )}`
+  );
+  console.log(
+    `- Sign in and reach availability grid: ${formatDuration(
+      timing.durationMs("websiteStart", "signedIn")
+    )}`
+  );
+  console.log(
+    `- Select trailhead: ${formatDuration(
+      timing.durationMs("signedIn", "trailheadSelected")
+    )}`
+  );
+  console.log(
+    `- Open reservation form: ${formatDuration(
+      timing.durationMs("trailheadSelected", "detailsReady")
+    )}`
+  );
+  console.log(
+    `- Fill form and prepare handoff: ${formatDuration(
+      timing.durationMs("detailsReady", "handoffReady")
+    )}`
+  );
+}
+
 export async function main() {
+  const timing = createTimingTracker();
   const request = await collectPermitRequest();
   await waitForRunPlan(request.runPlan);
   const context = await launchBrowser();
@@ -1785,19 +1963,25 @@ export async function main() {
   page.setDefaultTimeout(20000);
 
   try {
+    timing.mark("websiteStart");
     await ensureSignedIn(page, request);
+    timing.mark("signedIn");
     const selectedTrailhead = await selectTrailheadByPriority(page, request);
+    timing.mark("trailheadSelected");
     await continueToDetailsPage(page, request.account);
+    timing.mark("detailsReady");
     await fillReservationForm(page, request);
     await page.bringToFront().catch(() => {});
 
     const handoffUrl = page.url();
     await writeHandoffUrl(handoffUrl);
+    timing.mark("handoffReady");
 
     console.log("");
     console.log(`Selected entry point: ${selectedTrailhead.displayName ?? selectedTrailhead.name}`);
     console.log(`Handoff URL: ${handoffUrl}`);
     console.log(`Saved handoff URL to ${HANDOFF_FILE}`);
+    logWebsiteInteractionTiming(timing);
     await holdForHandoff();
   } catch (error) {
     const diagnostics = await captureDiagnostics(page, "permit-reservation-error");
@@ -1807,6 +1991,13 @@ export async function main() {
     console.error(error.message);
     console.error(`Current browser URL: ${currentUrl}`);
     console.error(`Saved diagnostics to ${diagnostics.pngPath} and ${diagnostics.htmlPath}`);
+    if (timing.has("websiteStart")) {
+      console.error(
+        `Website interaction elapsed before error: ${formatDuration(
+          timing.elapsedSince("websiteStart")
+        )}`
+      );
+    }
     await holdForHandoff();
     throw error;
   } finally {

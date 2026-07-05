@@ -96,6 +96,7 @@ When you run it this way, the program stores its working files in the folder you
 - Checks the `Need to Know` agreement when the site exposes a matching control
 - If you choose a later run time, waits inside the CLI until the requested date, time, and time zone and then starts the browser flow
 - Leaves the browser open and prints the current handoff URL
+- Prints a timing breakdown for the website-interaction portion of the run, from the first Recreation.gov page load to handoff
 
 ## Files Created By The Program
 
@@ -108,6 +109,7 @@ When you run it this way, the program stores its working files in the folder you
 ## Important Notes
 
 - The reliable handoff is the still-open browser window in the same logged-in session; the printed URL is only a convenience.
+- The timing summary shown at the end measures only the website-interaction portion of the run. It does not include the time you spend answering prompts before the browser starts.
 - Use the visible entry point names from the Recreation.gov availability grid when entering your priorities.
 - The program shows a numbered review of everything you entered and lets you correct one item at a time before the browser opens.
 - For scheduled runs, the time-zone prompt now defaults to `America/Los_Angeles`.
