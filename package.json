@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
+  "bin": {
+    "permit-reserve": "./src/backpacking-permit-reservation.mjs"
+  },
   "scripts": {
+    "start": "node ./src/backpacking-permit-reservation.mjs",
     "permit:reserve": "node ./src/backpacking-permit-reservation.mjs"
   },
   "dependencies": {

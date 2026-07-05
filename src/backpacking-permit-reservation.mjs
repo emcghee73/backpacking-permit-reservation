@@ -1,5 +1,6 @@
+#!/usr/bin/env node
+
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -10,9 +11,11 @@ const PERMIT_URL = "https://www.recreation.gov/permits/445859";
 const buildAvailabilityUrl = (entryDate) =>
   `https://www.recreation.gov/permits/445859/registration/detailed-availability?date=${entryDate}&type=overnight-permit`;
 
-const PROFILE_DIR = path.resolve(process.cwd(), "data/recreation-gov-profile");
-const DIAGNOSTIC_DIR = path.resolve(os.tmpdir(), "backpacking-permit-reservation");
-const HANDOFF_FILE = path.resolve(DIAGNOSTIC_DIR, "handoff-url.txt");
+const WORKSPACE_DIR = process.cwd();
+const RUNTIME_DIR = path.resolve(WORKSPACE_DIR, ".backpacking-permit-reservation");
+const PROFILE_DIR = path.resolve(RUNTIME_DIR, "browser-profile");
+const DIAGNOSTIC_DIR = path.resolve(RUNTIME_DIR, "diagnostics");
+const HANDOFF_FILE = path.resolve(RUNTIME_DIR, "handoff-url.txt");
 
 const FIXED_DETAILS = {
   travelMethod: "Foot",
