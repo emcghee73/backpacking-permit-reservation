@@ -1,0 +1,12 @@
+{
+  "name": "backpacking-permit-reservation",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "permit:reserve": "node ./src/backpacking-permit-reservation.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
