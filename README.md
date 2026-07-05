@@ -1,6 +1,6 @@
 # Backpacking Permit Reservation
 
-This project is a Playwright-based CLI for preparing a Yosemite wilderness permit reservation on Recreation.gov and stopping at a live browser handoff point so you can finish the booking manually.
+This project is a Playwright-based CLI for preparing a Yosemite or Inyo wilderness permit reservation on Recreation.gov and stopping at a live browser handoff point so you can finish the booking manually.
 
 ## Requirements
 
@@ -64,36 +64,37 @@ When you run it this way, the program stores its working files in the folder you
 
 ## What The Program Prompts For
 
+- Destination: `Yosemite` or `Inyo`
 - Recreation.gov login email and password
 - Group size
-- Entry date
-- Trailhead IDs in priority order
-- First-night camp text for each trailhead
-- Exit point
-- Exit date
+- Entry date in `YYYY-MM-DD` format
+- Entry point names in priority order
 - Permit-holder first name
 - Permit-holder last name
 - Permit-holder email
 - Permit-holder phone number
 - Permit-holder address
-- Emergency-contact first name
-- Emergency-contact last name
-- Emergency-contact phone number
+- A numbered review screen so you can correct any single item before the browser opens
+- A final choice to run immediately or wait until a later date, time, and time zone
 
 ## What It Automates
 
 - Signs into Recreation.gov
-- Opens the Yosemite wilderness permit availability grid
+- Opens the correct Recreation.gov permit flow for Yosemite or Inyo
+- For Inyo, selects `No` for the commercial-guided-trip question and `Overnight` for permit type before using the availability grid
 - Sets the requested group size
-- Tries trailhead IDs in priority order for the requested entry date
-- Selects the first available trailhead
-- Fills the reservation details form with your supplied information
-- Applies the fixed values:
+- Tries your entry point priorities in order for the requested entry date
+- Selects the first available entry point
+- If Recreation.gov asks for sign-in again after `Book Now`, submits the same login credentials automatically
+- Fills the reservation details form with your supplied permit-holder information
+- For Yosemite, applies the fixed values:
   - `Travel Method = Foot`
   - `Animals = No`
   - `Issuing Station = Tuolumne Meadows Wilderness Center`
   - `Late Arrival = Yes`
+- For Inyo, attempts the same fixed values when matching controls are present on the reservation form
 - Checks the `Need to Know` agreement when the site exposes a matching control
+- If you choose a later run time, waits inside the CLI until the requested date, time, and time zone and then starts the browser flow
 - Leaves the browser open and prints the current handoff URL
 
 ## Files Created By The Program
@@ -106,8 +107,22 @@ When you run it this way, the program stores its working files in the folder you
 
 ## Important Notes
 
-- The reliable handoff is the still-open browser window; the printed URL is only a convenience.
+- The reliable handoff is the still-open browser window in the same logged-in session; the printed URL is only a convenience.
+- Use the visible entry point names from the Recreation.gov availability grid when entering your priorities.
+- The program shows a numbered review of everything you entered and lets you correct one item at a time before the browser opens.
+- For scheduled runs, the time-zone prompt now defaults to `America/Los_Angeles`.
+- If you schedule a later run, keep the Terminal session open so the CLI can keep waiting and then start on time.
+- If you schedule a later run, the computer itself must stay awake. A sleeping Mac will pause the wait timer. The display can turn off, but the machine cannot sleep or close its lid.
+- On a Mac, one simple way to keep it awake during a scheduled run is:
+
+```bash
+caffeinate -i npm run permit:reserve
+```
+
+- The script does not fill the intended first-night camp location, exit point, or exit date. You can enter those manually after handoff.
+- The script also does not prompt for or fill the emergency contact name and phone number. You can enter those manually after handoff.
 - If Recreation.gov asks for extra sign-in verification, complete it in the opened browser window and then continue in Terminal.
+- If the automation hits an error, it still keeps the browser open so you can inspect the page or take over manually before closing it.
 - If Recreation.gov changes its labels or form structure, the script writes troubleshooting diagnostics into the current-directory runtime folder.
 
 ## Troubleshooting

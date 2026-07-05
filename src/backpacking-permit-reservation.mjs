@@ -7,21 +7,52 @@ import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 
-const PERMIT_URL = "https://www.recreation.gov/permits/445859";
-const buildAvailabilityUrl = (entryDate) =>
-  `https://www.recreation.gov/permits/445859/registration/detailed-availability?date=${entryDate}&type=overnight-permit`;
-
 const WORKSPACE_DIR = process.cwd();
 const RUNTIME_DIR = path.resolve(WORKSPACE_DIR, ".backpacking-permit-reservation");
 const PROFILE_DIR = path.resolve(RUNTIME_DIR, "browser-profile");
 const DIAGNOSTIC_DIR = path.resolve(RUNTIME_DIR, "diagnostics");
 const HANDOFF_FILE = path.resolve(RUNTIME_DIR, "handoff-url.txt");
+const DEFAULT_RUN_TIME_ZONE = "America/Los_Angeles";
 
-const FIXED_DETAILS = {
-  travelMethod: "Foot",
-  animals: "No",
-  issuingStation: "Tuolumne Meadows Wilderness Center",
-  lateArrival: "Yes",
+const FACILITIES = {
+  yosemite: {
+    key: "yosemite",
+    label: "Yosemite",
+    permitUrl: "https://www.recreation.gov/permits/445859",
+    buildAvailabilityUrl: (entryDate) =>
+      `https://www.recreation.gov/permits/445859/registration/detailed-availability?date=${entryDate}&type=overnight-permit`,
+    trailheadNameSuffixes: ["Yosemite"],
+    fixedDetails: {
+      travelMethod: { value: "Foot", required: true },
+      animals: { value: "No", required: true },
+      issuingStation: {
+        value: "Tuolumne Meadows Wilderness Center",
+        required: true,
+      },
+      lateArrival: { value: "Yes", required: true },
+    },
+  },
+  inyo: {
+    key: "inyo",
+    label: "Inyo",
+    permitUrl: "https://www.recreation.gov/permits/233262",
+    buildAvailabilityUrl: (entryDate) =>
+      `https://www.recreation.gov/permits/233262/registration/detailed-availability?date=${entryDate}`,
+    trailheadNameSuffixes: ["Inyo", "Inyo National Forest"],
+    availabilitySetup: {
+      commercialGuidedTrip: "No",
+      permitType: "Overnight",
+    },
+    fixedDetails: {
+      travelMethod: { value: "Foot", required: false },
+      animals: { value: "No", required: false },
+      issuingStation: {
+        value: "Tuolumne Meadows Wilderness Center",
+        required: false,
+      },
+      lateArrival: { value: "Yes", required: false },
+    },
+  },
 };
 
 function byLabel(text, exact = false) {
@@ -37,47 +68,6 @@ function bySelector(selector) {
 }
 
 const FIELD_CONFIG = {
-  firstNightCamp: {
-    description: "first-night camp location",
-    strategies: [
-      byLabel("Intended First Night's Camp Location", false),
-      byLabel("First Night's Camp Location", false),
-      byLabel("First Night Camp Location", false),
-      bySelector('textarea[name*="camp"]'),
-      bySelector('input[name*="camp"]'),
-    ],
-    tokenSets: [
-      ["first", "night", "camp"],
-      ["intended", "camp"],
-    ],
-    negativeTokens: ["emergency", "exit"],
-  },
-  exitPoint: {
-    description: "exit point",
-    strategies: [
-      byLabel("Exit Point", false),
-      byLabel("Exit Trailhead", false),
-      bySelector('input[name*="exit"]'),
-      bySelector('select[name*="exit"]'),
-    ],
-    tokenSets: [
-      ["exit", "point"],
-      ["exit", "trailhead"],
-    ],
-    negativeTokens: ["date"],
-  },
-  exitDate: {
-    description: "exit date",
-    strategies: [
-      byLabel("Exit Date", false),
-      bySelector('input[name*="exit"][type="date"]'),
-      bySelector('input[name*="exit"][name*="date"]'),
-    ],
-    tokenSets: [
-      ["exit", "date"],
-    ],
-    negativeTokens: ["entry"],
-  },
   permitHolderFirstName: {
     description: "permit holder first name",
     strategies: [
@@ -282,6 +272,10 @@ function normalizeText(value) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function parseIsoDate(value) {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) {
@@ -296,7 +290,144 @@ function parseIsoDate(value) {
   return date.toISOString().slice(0, 10) === value ? date : null;
 }
 
-function buildDateButtonFragment(entryDate) {
+function parseTimeOfDay(value) {
+  const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    hour: Number(match[1]),
+    minute: Number(match[2]),
+  };
+}
+
+function isValidTimeZone(value) {
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getTimeZoneParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  const parts = Object.fromEntries(
+    formatter
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function formatInstantInTimeZone(date, timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function zonedDateTimeToDate(dateValue, timeValue, timeZone) {
+  const parsedDate = parseIsoDate(dateValue);
+  if (!parsedDate) {
+    throw new Error("Enter the run date as YYYY-MM-DD.");
+  }
+
+  const parsedTime = parseTimeOfDay(timeValue);
+  if (!parsedTime) {
+    throw new Error("Enter the run time as HH:MM in 24-hour time.");
+  }
+
+  if (!isValidTimeZone(timeZone)) {
+    throw new Error(
+      "Enter a valid IANA time zone such as America/Los_Angeles."
+    );
+  }
+
+  const desired = {
+    year: parsedDate.getUTCFullYear(),
+    month: parsedDate.getUTCMonth() + 1,
+    day: parsedDate.getUTCDate(),
+    hour: parsedTime.hour,
+    minute: parsedTime.minute,
+    second: 0,
+  };
+
+  const desiredAsUtcMs = Date.UTC(
+    desired.year,
+    desired.month - 1,
+    desired.day,
+    desired.hour,
+    desired.minute,
+    desired.second
+  );
+
+  let guessMs = desiredAsUtcMs;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const actual = getTimeZoneParts(new Date(guessMs), timeZone);
+    const actualAsUtcMs = Date.UTC(
+      actual.year,
+      actual.month - 1,
+      actual.day,
+      actual.hour,
+      actual.minute,
+      actual.second
+    );
+    const diffMs = desiredAsUtcMs - actualAsUtcMs;
+
+    if (diffMs === 0) {
+      break;
+    }
+
+    guessMs += diffMs;
+  }
+
+  const resolvedDate = new Date(guessMs);
+  const resolvedParts = getTimeZoneParts(resolvedDate, timeZone);
+  if (
+    resolvedParts.year !== desired.year ||
+    resolvedParts.month !== desired.month ||
+    resolvedParts.day !== desired.day ||
+    resolvedParts.hour !== desired.hour ||
+    resolvedParts.minute !== desired.minute
+  ) {
+    throw new Error(
+      "That local date and time does not map cleanly in the requested time zone. Try a different time."
+    );
+  }
+
+  return resolvedDate;
+}
+
+function buildDateButtonToken(entryDate) {
   const parsed = parseIsoDate(entryDate);
   if (!parsed) {
     throw new Error(`Invalid entry date: ${entryDate}`);
@@ -309,7 +440,22 @@ function buildDateButtonFragment(entryDate) {
     })
     .toUpperCase();
 
-  return `${weekday} ${parsed.getUTCDate()} People:`;
+  return `${weekday} ${parsed.getUTCDate()}`;
+}
+
+function buildColumnHeaderLabel(entryDate) {
+  const parsed = parseIsoDate(entryDate);
+  if (!parsed) {
+    throw new Error(`Invalid entry date: ${entryDate}`);
+  }
+
+  return parsed.toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 async function prompt(question, defaultValue = "") {
@@ -346,11 +492,34 @@ async function promptEnter(question) {
 
 async function promptDate(question) {
   while (true) {
-    const answer = await promptRequired(question);
+    const answer = await promptRequired(`${question} (YYYY-MM-DD)`);
     if (parseIsoDate(answer)) {
       return answer;
     }
     console.log("Enter the date as YYYY-MM-DD.");
+  }
+}
+
+async function promptTimeOfDay(question) {
+  while (true) {
+    const answer = await promptRequired(`${question} (HH:MM, 24-hour time)`);
+    if (parseTimeOfDay(answer)) {
+      return answer;
+    }
+    console.log("Enter the time as HH:MM in 24-hour time.");
+  }
+}
+
+async function promptTimeZone(question, defaultValue = DEFAULT_RUN_TIME_ZONE) {
+  while (true) {
+    const answer = await promptRequired(
+      `${question} (IANA name, for example America/Los_Angeles)`,
+      defaultValue
+    );
+    if (isValidTimeZone(answer)) {
+      return answer;
+    }
+    console.log("Enter a valid IANA time zone such as America/Los_Angeles.");
   }
 }
 
@@ -376,6 +545,7 @@ async function promptSecret(question) {
   input.setEncoding("utf8");
 
   let value = "";
+  let escapeBuffer = "";
 
   return await new Promise((resolve, reject) => {
     function cleanup() {
@@ -384,75 +554,343 @@ async function promptSecret(question) {
       output.write("\n");
     }
 
-    function onData(chunk) {
-      const char = String(chunk);
+    function readPlainText(chunk) {
+      escapeBuffer += String(chunk);
+      let plainText = "";
 
-      if (char === "\u0003") {
-        cleanup();
-        reject(new Error("Prompt cancelled."));
-        return;
-      }
-
-      if (char === "\r" || char === "\n") {
-        cleanup();
-        resolve(value);
-        return;
-      }
-
-      if (char === "\u007f") {
-        if (value.length > 0) {
-          value = value.slice(0, -1);
-          output.write("\b \b");
+      while (escapeBuffer.length > 0) {
+        if (escapeBuffer[0] !== "\u001b") {
+          plainText += escapeBuffer[0];
+          escapeBuffer = escapeBuffer.slice(1);
+          continue;
         }
-        return;
+
+        const ansiMatch = escapeBuffer.match(/^\u001b\[[0-9;?]*[ -/]*[@-~]/);
+        if (ansiMatch) {
+          escapeBuffer = escapeBuffer.slice(ansiMatch[0].length);
+          continue;
+        }
+
+        break;
       }
 
-      value += char;
-      output.write("*");
+      return plainText;
+    }
+
+    function onData(chunk) {
+      const plainText = readPlainText(chunk);
+
+      for (const char of plainText) {
+        if (char === "\u0003") {
+          cleanup();
+          reject(new Error("Prompt cancelled."));
+          return;
+        }
+
+        if (char === "\r" || char === "\n") {
+          cleanup();
+          resolve(value);
+          return;
+        }
+
+        if (char === "\u007f" || char === "\b") {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            output.write("\b \b");
+          }
+          continue;
+        }
+
+        value += char;
+        output.write("*");
+      }
     }
 
     input.on("data", onData);
   });
 }
 
-function parseTrailheadIds(value) {
-  const ids = value
+async function promptChoice(question, options, defaultValue) {
+  const normalizedOptions = new Map(
+    options.map((option) => [option.toLowerCase(), option])
+  );
+  const promptText = `${question} (${options.join("/")})`;
+
+  while (true) {
+    const answer = normalizeText(
+      await prompt(promptText, defaultValue ?? options[0])
+    );
+    const selected = normalizedOptions.get(answer.toLowerCase());
+    if (selected) {
+      return selected;
+    }
+    console.log(`Choose one of: ${options.join(", ")}.`);
+  }
+}
+
+function parseTrailheadPriorities(value) {
+  return value
     .split(",")
     .map((item) => normalizeText(item))
     .filter(Boolean);
+}
 
-  if (ids.length === 0) {
-    return [];
+function stripTrailheadSuffixes(value, destination) {
+  let cleaned = normalizeText(value);
+  for (const suffix of destination?.trailheadNameSuffixes ?? []) {
+    cleaned = cleaned.replace(
+      new RegExp(`\\s+${escapeRegex(suffix)}$`, "i"),
+      ""
+    );
+  }
+  return normalizeText(cleaned);
+}
+
+function normalizeTrailheadName(value, destination) {
+  return stripTrailheadSuffixes(value, destination).toLowerCase();
+}
+
+function formatTrailheads(trailheads) {
+  return trailheads.map((trailhead) => trailhead.name).join(", ");
+}
+
+function maskSecret(value) {
+  if (!value) {
+    return "(blank)";
+  }
+  return "*".repeat(Math.max(value.length, 8));
+}
+
+async function getTrailheadDisplayName(row, destination) {
+  const nameButton = row.locator("button[aria-label]:not(.rec-availability-date)");
+  const nameButtonCount = await nameButton.count().catch(() => 0);
+  if (nameButtonCount === 1) {
+    const ariaLabel = normalizeText(
+      (await nameButton.getAttribute("aria-label", { timeoutMs: 5000 }).catch(() => "")) ?? ""
+    );
+    if (ariaLabel) {
+      return ariaLabel;
+    }
+
+    const buttonText = normalizeText(
+      await nameButton.innerText({ timeoutMs: 5000 }).catch(() => "")
+    );
+    if (buttonText) {
+      return buttonText;
+    }
   }
 
-  const invalid = ids.find((id) => !/^\d+$/.test(id));
-  if (invalid) {
-    throw new Error(`Trailhead IDs must be numeric. Invalid value: ${invalid}`);
+  const cells = row.locator('[role="gridcell"]');
+  const cellCount = await cells.count().catch(() => 0);
+  for (let index = 0; index < cellCount; index += 1) {
+    const cellText = normalizeText(
+      await cells.nth(index).innerText({ timeoutMs: 5000 }).catch(() => "")
+    );
+    const strippedCellText = stripTrailheadSuffixes(cellText, destination);
+    if (!strippedCellText || /^\d+$/.test(strippedCellText)) {
+      continue;
+    }
+    return strippedCellText;
   }
 
-  return ids;
+  return "";
+}
+
+async function promptDestination() {
+  const choice = await promptChoice(
+    "Where do you want to go?",
+    ["Yosemite", "Inyo"],
+    "Yosemite"
+  );
+
+  return FACILITIES[choice.toLowerCase()];
 }
 
 async function promptTrailheads() {
   while (true) {
     try {
-      const rawIds = await promptRequired("Trailhead IDs in priority order (comma-separated)");
-      const ids = parseTrailheadIds(rawIds);
+      const rawPriorities = await promptRequired(
+        "Entry point names in priority order (comma-separated)"
+      );
+      const priorities = parseTrailheadPriorities(rawPriorities);
 
-      if (ids.length === 0) {
-        console.log("Enter at least one trailhead ID.");
+      if (priorities.length === 0) {
+        console.log("Enter at least one entry point name.");
         continue;
       }
 
-      const trailheads = [];
-      for (const id of ids) {
-        const firstNightCamp = await promptRequired(
-          `Intended first-night camp location text for trailhead ${id}`
+      return priorities.map((name) => ({ name }));
+    } catch (error) {
+      console.log(error.message);
+    }
+  }
+}
+
+function buildRequestReviewItems(request) {
+  return [
+    {
+      label: "Destination",
+      display: () => request.destination.label,
+      edit: async () => {
+        request.destination = await promptDestination();
+      },
+    },
+    {
+      label: "Recreation.gov login email",
+      display: () => request.account.email,
+      edit: async () => {
+        request.account.email = await promptRequired("Recreation.gov login email");
+      },
+    },
+    {
+      label: "Recreation.gov password",
+      display: () => maskSecret(request.account.password),
+      edit: async () => {
+        request.account.password = await promptRequiredSecret(
+          "Recreation.gov password"
         );
-        trailheads.push({ id, firstNightCamp });
+      },
+    },
+    {
+      label: "Number of people on the permit",
+      display: () => String(request.groupSize),
+      edit: async () => {
+        request.groupSize = await promptPositiveInteger(
+          "Number of people on the permit"
+        );
+      },
+    },
+    {
+      label: "Entry date",
+      display: () => request.entryDate,
+      edit: async () => {
+        request.entryDate = await promptDate("Entry date");
+      },
+    },
+    {
+      label: "Entry point names in priority order",
+      display: () => formatTrailheads(request.trailheads),
+      edit: async () => {
+        request.trailheads = await promptTrailheads();
+      },
+    },
+    {
+      label: "Permit holder first name",
+      display: () => request.permitHolder.firstName,
+      edit: async () => {
+        request.permitHolder.firstName = await promptRequired(
+          "Permit holder first name"
+        );
+      },
+    },
+    {
+      label: "Permit holder last name",
+      display: () => request.permitHolder.lastName,
+      edit: async () => {
+        request.permitHolder.lastName = await promptRequired(
+          "Permit holder last name"
+        );
+      },
+    },
+    {
+      label: "Permit holder email",
+      display: () => request.permitHolder.email,
+      edit: async () => {
+        request.permitHolder.email = await promptRequired("Permit holder email");
+      },
+    },
+    {
+      label: "Permit holder phone number",
+      display: () => request.permitHolder.phone,
+      edit: async () => {
+        request.permitHolder.phone = await promptRequired(
+          "Permit holder phone number"
+        );
+      },
+    },
+    {
+      label: "Permit holder address",
+      display: () => request.permitHolder.address,
+      edit: async () => {
+        request.permitHolder.address = await promptRequired(
+          "Permit holder address"
+        );
+      },
+    },
+  ];
+}
+
+async function reviewPermitRequest(request) {
+  while (true) {
+    const reviewItems = buildRequestReviewItems(request);
+
+    console.log("");
+    console.log("Review the information below before the browser opens:");
+    console.log("");
+
+    for (const [index, item] of reviewItems.entries()) {
+      console.log(`${index + 1}) ${item.label}: ${item.display()}`);
+    }
+
+    console.log("");
+    const answer = await prompt(
+      "Enter the number of an item to correct, or press Return to continue"
+    );
+
+    if (!answer) {
+      return;
+    }
+
+    const selectedIndex = Number.parseInt(answer, 10);
+    if (
+      !Number.isInteger(selectedIndex) ||
+      selectedIndex < 1 ||
+      selectedIndex > reviewItems.length
+    ) {
+      console.log("Enter one of the listed numbers, or press Return to continue.");
+      continue;
+    }
+
+    console.log("");
+    await reviewItems[selectedIndex - 1].edit();
+  }
+}
+
+async function promptRunPlan() {
+  const runChoice = await promptChoice(
+    "Run the script now or wait until a later time?",
+    ["now", "later"],
+    "now"
+  );
+
+  if (runChoice === "now") {
+    return {
+      mode: "now",
+    };
+  }
+
+  while (true) {
+    try {
+      const runDate = await promptDate("Run date");
+      const runTime = await promptTimeOfDay("Run time");
+      const timeZone = await promptTimeZone("Run time zone");
+      const runAt = zonedDateTimeToDate(runDate, runTime, timeZone);
+
+      if (runAt.getTime() <= Date.now()) {
+        console.log("Enter a future date and time.");
+        continue;
       }
 
-      return trailheads;
+      console.log("");
+      console.log(
+        `Scheduled start: ${formatInstantInTimeZone(runAt, timeZone)} (${timeZone})`
+      );
+
+      return {
+        mode: "later",
+        runAtIso: runAt.toISOString(),
+        timeZone,
+      };
     } catch (error) {
       console.log(error.message);
     }
@@ -464,6 +902,7 @@ async function collectPermitRequest() {
   console.log("Backpacking permit reservation intake");
   console.log("");
 
+  const destination = await promptDestination();
   const accountEmail = await promptRequired(
     "Recreation.gov login email",
     process.env.RECREATION_GOV_USERNAME ?? ""
@@ -474,21 +913,12 @@ async function collectPermitRequest() {
       : "";
 
   while (!accountPassword) {
-    accountPassword = normalizeText(await promptSecret("Recreation.gov password"));
-    if (!accountPassword) {
-      console.log("A value is required.");
-    }
+    accountPassword = await promptRequiredSecret("Recreation.gov password");
   }
 
   const groupSize = await promptPositiveInteger("Number of people on the permit");
   const entryDate = await promptDate("Entry date");
   const trailheads = await promptTrailheads();
-  const exitPoint = await promptRequired("Exit point");
-  let exitDate = await promptDate("Exit date");
-  while (exitDate < entryDate) {
-    console.log("Exit date must be on or after the entry date.");
-    exitDate = await promptDate("Exit date");
-  }
 
   const permitHolder = {
     firstName: await promptRequired("Permit holder first name"),
@@ -498,13 +928,8 @@ async function collectPermitRequest() {
     address: await promptRequired("Permit holder address"),
   };
 
-  const emergencyContact = {
-    firstName: await promptRequired("Emergency contact first name"),
-    lastName: await promptRequired("Emergency contact last name"),
-    phone: await promptRequired("Emergency contact phone number"),
-  };
-
-  return {
+  const request = {
+    destination,
     account: {
       email: accountEmail,
       password: accountPassword,
@@ -512,11 +937,49 @@ async function collectPermitRequest() {
     groupSize,
     entryDate,
     trailheads,
-    exitPoint,
-    exitDate,
     permitHolder,
-    emergencyContact,
   };
+
+  await reviewPermitRequest(request);
+  request.runPlan = await promptRunPlan();
+  return request;
+}
+
+async function waitForRunPlan(runPlan) {
+  if (!runPlan || runPlan.mode !== "later") {
+    return;
+  }
+
+  const target = new Date(runPlan.runAtIso);
+  console.log("");
+  console.log(
+    `Waiting until ${formatInstantInTimeZone(target, runPlan.timeZone)} (${runPlan.timeZone}) to begin...`
+  );
+
+  while (true) {
+    const remainingMs = target.getTime() - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+
+    let delayMs = remainingMs;
+    if (remainingMs > 60 * 60 * 1000) {
+      delayMs = Math.min(remainingMs, 15 * 60 * 1000);
+    } else if (remainingMs > 5 * 60 * 1000) {
+      delayMs = Math.min(remainingMs, 60 * 1000);
+    } else if (remainingMs > 10 * 1000) {
+      delayMs = Math.min(remainingMs, 5 * 1000);
+    } else {
+      delayMs = Math.min(remainingMs, 250);
+    }
+
+    await sleep(delayMs);
+  }
+
+  console.log("");
+  console.log(
+    `Starting now at ${formatInstantInTimeZone(new Date(), runPlan.timeZone)} (${runPlan.timeZone}).`
+  );
 }
 
 async function isVisible(locator) {
@@ -752,6 +1215,16 @@ async function fillTextLikeField(page, fieldKey, value) {
   await locator.fill(value);
 }
 
+async function promptRequiredSecret(question) {
+  while (true) {
+    const answer = normalizeText(await promptSecret(question));
+    if (answer) {
+      return answer;
+    }
+    console.log("A value is required.");
+  }
+}
+
 async function selectChoiceField(page, fieldKey, value) {
   const locator = await resolveFieldLocator(page, fieldKey);
   if (!locator) {
@@ -787,6 +1260,22 @@ async function selectChoiceField(page, fieldKey, value) {
   );
 }
 
+async function applyChoiceField(page, fieldKey, value, required) {
+  if (!value) {
+    return;
+  }
+
+  try {
+    await selectChoiceField(page, fieldKey, value);
+  } catch (error) {
+    if (required) {
+      throw error;
+    }
+
+    console.log(`Skipping ${FIELD_CONFIG[fieldKey].description}: ${error.message}`);
+  }
+}
+
 async function acceptNeedToKnow(page) {
   const locator = await resolveFieldLocator(page, "needToKnowAgreement");
   if (!locator) {
@@ -814,8 +1303,102 @@ async function captureDiagnostics(page, label) {
   return { pngPath, htmlPath };
 }
 
-async function ensureSignedIn(page, account) {
-  await page.goto(PERMIT_URL, { waitUntil: "domcontentloaded" });
+async function firstVisibleLocator(locator) {
+  const count = await locator.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (await isVisible(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function findVisibleLocator(candidates) {
+  for (const candidate of candidates) {
+    const visibleCandidate = await firstVisibleLocator(candidate);
+    if (visibleCandidate) {
+      return visibleCandidate;
+    }
+  }
+
+  return null;
+}
+
+async function getVisibleLoginForm(page) {
+  const loginDialog = page.getByRole("dialog", {
+    name: "Log In to Recreation.gov",
+    exact: false,
+  });
+  const root =
+    (await isVisible(loginDialog))
+      ? loginDialog
+      : page;
+
+  const emailField = await findVisibleLocator([
+    root.getByLabel("Email (Required)", { exact: true }),
+    root.getByRole("textbox", { name: "Email (Required)", exact: true }),
+    root.locator('input[type="email"]'),
+    root.locator('input[name*="email" i]'),
+  ]);
+  const passwordField = await findVisibleLocator([
+    root.getByLabel("Password (Required)", { exact: true }),
+    root.locator('input[type="password"]'),
+  ]);
+
+  if (!emailField || !passwordField) {
+    return null;
+  }
+
+  const submitButton = await findVisibleLocator([
+    root.getByRole("button", { name: "Log In", exact: true }),
+    root.getByRole("button", { name: "Log In", exact: false }),
+    root.getByRole("button", { name: "Sign In", exact: false }),
+    root.locator('button[type="submit"]'),
+    root.locator('input[type="submit"]'),
+  ]);
+
+  if (!submitButton) {
+    return null;
+  }
+
+  return {
+    root,
+    emailField,
+    passwordField,
+    submitButton,
+  };
+}
+
+async function submitLoginIfVisible(page, account, reason = "Signing into Recreation.gov...") {
+  const loginForm = await getVisibleLoginForm(page);
+  if (!loginForm) {
+    return false;
+  }
+
+  console.log(reason);
+  await loginForm.emailField.fill(account.email);
+  await loginForm.passwordField.fill(account.password);
+  await loginForm.submitButton.click();
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (!(await getVisibleLoginForm(page))) {
+      return true;
+    }
+    await sleep(500);
+  }
+
+  console.log("");
+  console.log("Additional sign-in verification appears to be required.");
+  console.log("Complete any sign-in challenge in the opened browser window, then continue here.");
+  await promptEnter("Press Enter once Recreation.gov shows you as signed in");
+  return true;
+}
+
+async function ensureSignedIn(page, request) {
+  await page.goto(request.destination.permitUrl, { waitUntil: "domcontentloaded" });
   await page.bringToFront().catch(() => {});
 
   const loginButton = page.getByRole("button", {
@@ -828,44 +1411,63 @@ async function ensureSignedIn(page, account) {
     return;
   }
 
-  console.log("Signing into Recreation.gov...");
   await loginButton.click();
+  const submitted = await submitLoginIfVisible(page, request.account);
+  if (!submitted) {
+    throw new Error("The Recreation.gov login form did not appear after clicking Log In.");
+  }
+}
 
-  const emailField = page.getByRole("textbox", {
-    name: "Email (Required)",
+async function setRadioChoice(page, label) {
+  const radio = page.getByRole("radio", {
+    name: label,
     exact: true,
   });
-  const passwordField = page.getByRole("textbox", {
-    name: "Password (Required)",
-    exact: true,
-  });
-
-  await emailField.fill(account.email);
-  await passwordField.fill(account.password);
-  await page.getByRole("button", { name: "Log In", exact: true }).click();
-
-  const loginDeadline = Date.now() + 15000;
-  while (Date.now() < loginDeadline) {
-    if (!(await isVisible(loginButton))) {
-      return;
-    }
-
-    const loginDialog = page.getByRole("dialog", {
-      name: "Log In to Recreation.gov",
-      exact: false,
-    });
-
-    if (!(await isVisible(loginDialog))) {
-      return;
-    }
-
-    await sleep(500);
+  const count = await radio.count().catch(() => 0);
+  if (count !== 1) {
+    throw new Error(`Unable to find the "${label}" radio option.`);
   }
 
-  console.log("");
-  console.log("Additional sign-in verification appears to be required.");
-  console.log("Complete any sign-in challenge in the opened browser window, then continue here.");
-  await promptEnter("Press Enter once Recreation.gov shows you as signed in");
+  await radio.click();
+}
+
+async function selectVisibleNativeOption(page, selectors, label, description) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+
+    for (let index = 0; index < count; index += 1) {
+      const candidate = locator.nth(index);
+      if (!(await candidate.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      await candidate.selectOption({ label });
+      return;
+    }
+  }
+
+  throw new Error(`Unable to find the ${description} control.`);
+}
+
+async function prepareAvailabilityGrid(page, request) {
+  const availabilitySetup = request.destination.availabilitySetup;
+  if (availabilitySetup?.commercialGuidedTrip) {
+    console.log(
+      `Setting commercial guided trip to ${availabilitySetup.commercialGuidedTrip}...`
+    );
+    await setRadioChoice(page, availabilitySetup.commercialGuidedTrip);
+  }
+
+  if (availabilitySetup?.permitType) {
+    console.log(`Setting permit type to ${availabilitySetup.permitType}...`);
+    await selectVisibleNativeOption(
+      page,
+      ["select#permit-type", 'select[name*="permit"]'],
+      availabilitySetup.permitType,
+      "permit type"
+    );
+  }
 }
 
 async function setGroupSize(page, groupSize) {
@@ -897,55 +1499,138 @@ async function setGroupSize(page, groupSize) {
   }
 }
 
-async function findTrailheadRow(page, trailheadId) {
-  const row = page
-    .locator('[role="row"]')
-    .filter({
-      has: page.getByRole("gridcell", {
-        name: trailheadId,
-        exact: true,
-      }),
-    });
+async function setEntryDate(page, entryDate) {
+  console.log(`Setting entry date to ${entryDate}...`);
+  const [year, month, day] = entryDate.split("-");
+  const spinbuttons = page.getByRole("spinbutton");
+  const spinbuttonCount = await spinbuttons.count().catch(() => 0);
 
-  const count = await row.count().catch(() => 0);
-  return count === 1 ? row : null;
+  if (spinbuttonCount < 3) {
+    throw new Error("Unable to find the entry date controls.");
+  }
+
+  const monthField = spinbuttons.nth(0);
+  const dayField = spinbuttons.nth(1);
+  const yearField = spinbuttons.nth(2);
+
+  await monthField.fill(String(Number.parseInt(month, 10)));
+  await dayField.fill(String(Number.parseInt(day, 10)));
+  await yearField.fill(year);
+  await yearField.press("Tab").catch(() => {});
+
+  const headerLabel = buildColumnHeaderLabel(entryDate);
+  const matchingHeader = page.getByRole("columnheader", {
+    name: headerLabel,
+    exact: false,
+  });
+
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if ((await matchingHeader.count().catch(() => 0)) > 0) {
+      return;
+    }
+    await sleep(500);
+  }
+
+  throw new Error(`The availability grid did not update to show ${headerLabel}.`);
+}
+
+async function getTrailheadRowInventory(page, destination) {
+  const rows = page.locator('[role="row"]');
+  const rowCount = await rows.count().catch(() => 0);
+  const inventory = [];
+
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = rows.nth(index);
+    const cells = row.locator('[role="gridcell"]');
+    const cellCount = await cells.count().catch(() => 0);
+    if (cellCount === 0) {
+      continue;
+    }
+
+    const displayName = await getTrailheadDisplayName(row, destination);
+    const normalizedName = normalizeTrailheadName(displayName, destination);
+
+    if (!normalizedName) {
+      continue;
+    }
+
+    inventory.push({
+      displayName,
+      normalizedName,
+      row,
+    });
+  }
+
+  return inventory;
+}
+
+function findTrailheadRow(entryPointName, inventory, destination) {
+  const normalizedInput = normalizeTrailheadName(entryPointName, destination);
+  if (!normalizedInput) {
+    return null;
+  }
+
+  const exactMatches = inventory.filter((entry) => entry.normalizedName === normalizedInput);
+  if (exactMatches.length === 1) {
+    return exactMatches[0];
+  }
+
+  const fuzzyMatches = inventory.filter((entry) =>
+    entry.normalizedName.includes(normalizedInput) || normalizedInput.includes(entry.normalizedName)
+  );
+
+  return fuzzyMatches.length === 1 ? fuzzyMatches[0] : null;
 }
 
 async function selectTrailheadByPriority(page, request) {
   console.log("Opening the availability grid...");
-  await page.goto(buildAvailabilityUrl(request.entryDate), {
+  await page.goto(request.destination.buildAvailabilityUrl(request.entryDate), {
     waitUntil: "domcontentloaded",
   });
 
+  await prepareAvailabilityGrid(page, request);
+  await setEntryDate(page, request.entryDate);
   await setGroupSize(page, request.groupSize);
+  await setEntryDate(page, request.entryDate);
 
-  const dateFragment = buildDateButtonFragment(request.entryDate);
+  const trailheadInventory = await getTrailheadRowInventory(
+    page,
+    request.destination
+  );
+  const dateToken = buildDateButtonToken(request.entryDate);
   const bookNowButton = page.getByRole("button", {
     name: "Book Now",
     exact: true,
   });
+  let matchedAtLeastOneTrailhead = false;
 
   for (const trailhead of request.trailheads) {
-    console.log(`Checking trailhead ${trailhead.id}...`);
-    const row = await findTrailheadRow(page, trailhead.id);
-    if (!row) {
-      console.log(`Trailhead ${trailhead.id} was not present in the current table view.`);
+    console.log(`Checking entry point ${trailhead.name}...`);
+    const matchedTrailhead = findTrailheadRow(
+      trailhead.name,
+      trailheadInventory,
+      request.destination
+    );
+    if (!matchedTrailhead) {
+      console.log(`Entry point ${trailhead.name} was not present in the current table view.`);
       continue;
     }
+    matchedAtLeastOneTrailhead = true;
 
+    const row = matchedTrailhead.row;
     const availabilityButton = row.getByRole("button", {
-      name: dateFragment,
+      name: dateToken,
       exact: false,
     });
-
     const buttonCount = await availabilityButton.count().catch(() => 0);
     if (buttonCount !== 1) {
-      console.log(`Trailhead ${trailhead.id} does not have a clickable slot for ${request.entryDate}.`);
+      console.log(`Entry point ${trailhead.name} does not expose a selectable cell for ${request.entryDate}.`);
       continue;
     }
 
     if (!(await availabilityButton.isEnabled().catch(() => false))) {
-      console.log(`Trailhead ${trailhead.id} is visible but not bookable for ${request.entryDate}.`);
+      console.log(`Entry point ${trailhead.name} is visible but not bookable for ${request.entryDate}.`);
       continue;
     }
 
@@ -954,8 +1639,11 @@ async function selectTrailheadByPriority(page, request) {
     const enableDeadline = Date.now() + 5000;
     while (Date.now() < enableDeadline) {
       if (await bookNowButton.isEnabled().catch(() => false)) {
-        console.log(`Selected trailhead ${trailhead.id}.`);
-        return trailhead;
+        console.log(`Selected entry point ${matchedTrailhead.displayName}.`);
+        return {
+          ...trailhead,
+          displayName: matchedTrailhead.displayName,
+        };
       }
       await sleep(250);
     }
@@ -971,15 +1659,19 @@ async function selectTrailheadByPriority(page, request) {
     }
   }
 
+  if (!matchedAtLeastOneTrailhead) {
+    throw new Error(
+      "None of the requested entry points could be matched on Recreation.gov. Enter the visible entry point names from the availability grid."
+    );
+  }
+
   throw new Error(
-    `None of the requested trailheads had availability on ${request.entryDate}.`
+    `None of the requested entry points had availability on ${request.entryDate}.`
   );
 }
 
-async function waitForReservationForm(page) {
+async function waitForReservationForm(page, account) {
   const detectionFields = [
-    "firstNightCamp",
-    "exitPoint",
     "travelMethod",
     "issuingStation",
   ];
@@ -992,6 +1684,16 @@ async function waitForReservationForm(page) {
         return;
       }
     }
+
+    const loginSubmitted = await submitLoginIfVisible(
+      page,
+      account,
+      "Recreation.gov requested sign-in before opening permit details. Submitting credentials..."
+    );
+    if (loginSubmitted) {
+      continue;
+    }
+
     await sleep(750);
   }
 
@@ -1001,28 +1703,25 @@ async function waitForReservationForm(page) {
   await promptEnter("Press Enter once the permit details form is visible");
 }
 
-async function continueToDetailsPage(page) {
+async function continueToDetailsPage(page, account) {
   const bookNowButton = page.getByRole("button", {
     name: "Book Now",
     exact: true,
   });
 
   if (!(await bookNowButton.isEnabled().catch(() => false))) {
-    throw new Error("Book Now is not enabled after selecting a trailhead.");
+    throw new Error("Book Now is not enabled after selecting an entry point.");
   }
 
   console.log("Opening the reservation details screen...");
   await bookNowButton.click();
-  await sleep(2000);
-  await waitForReservationForm(page);
+  await sleep(1000);
+  await waitForReservationForm(page, account);
 }
 
-async function fillReservationForm(page, request, selectedTrailhead) {
+async function fillReservationForm(page, request) {
   console.log("Filling the reservation form...");
-
-  await fillTextLikeField(page, "firstNightCamp", selectedTrailhead.firstNightCamp);
-  await fillTextLikeField(page, "exitPoint", request.exitPoint);
-  await fillTextLikeField(page, "exitDate", request.exitDate);
+  const fixedDetails = request.destination.fixedDetails;
 
   await fillTextLikeField(page, "permitHolderFirstName", request.permitHolder.firstName);
   await fillTextLikeField(page, "permitHolderLastName", request.permitHolder.lastName);
@@ -1030,14 +1729,30 @@ async function fillReservationForm(page, request, selectedTrailhead) {
   await fillTextLikeField(page, "permitHolderPhone", request.permitHolder.phone);
   await fillTextLikeField(page, "permitHolderAddress", request.permitHolder.address);
 
-  await fillTextLikeField(page, "emergencyFirstName", request.emergencyContact.firstName);
-  await fillTextLikeField(page, "emergencyLastName", request.emergencyContact.lastName);
-  await fillTextLikeField(page, "emergencyPhone", request.emergencyContact.phone);
-
-  await selectChoiceField(page, "travelMethod", FIXED_DETAILS.travelMethod);
-  await selectChoiceField(page, "animals", FIXED_DETAILS.animals);
-  await selectChoiceField(page, "issuingStation", FIXED_DETAILS.issuingStation);
-  await selectChoiceField(page, "lateArrival", FIXED_DETAILS.lateArrival);
+  await applyChoiceField(
+    page,
+    "travelMethod",
+    fixedDetails.travelMethod?.value,
+    fixedDetails.travelMethod?.required ?? true
+  );
+  await applyChoiceField(
+    page,
+    "animals",
+    fixedDetails.animals?.value,
+    fixedDetails.animals?.required ?? true
+  );
+  await applyChoiceField(
+    page,
+    "issuingStation",
+    fixedDetails.issuingStation?.value,
+    fixedDetails.issuingStation?.required ?? true
+  );
+  await applyChoiceField(
+    page,
+    "lateArrival",
+    fixedDetails.lateArrival?.value,
+    fixedDetails.lateArrival?.required ?? true
+  );
   await acceptNeedToKnow(page);
 }
 
@@ -1064,30 +1779,35 @@ async function holdForHandoff() {
 
 export async function main() {
   const request = await collectPermitRequest();
+  await waitForRunPlan(request.runPlan);
   const context = await launchBrowser();
   const page = context.pages()[0] ?? (await context.newPage());
   page.setDefaultTimeout(20000);
 
   try {
-    await ensureSignedIn(page, request.account);
+    await ensureSignedIn(page, request);
     const selectedTrailhead = await selectTrailheadByPriority(page, request);
-    await continueToDetailsPage(page);
-    await fillReservationForm(page, request, selectedTrailhead);
+    await continueToDetailsPage(page, request.account);
+    await fillReservationForm(page, request);
     await page.bringToFront().catch(() => {});
 
     const handoffUrl = page.url();
     await writeHandoffUrl(handoffUrl);
 
     console.log("");
-    console.log(`Selected trailhead: ${selectedTrailhead.id}`);
+    console.log(`Selected entry point: ${selectedTrailhead.displayName ?? selectedTrailhead.name}`);
     console.log(`Handoff URL: ${handoffUrl}`);
     console.log(`Saved handoff URL to ${HANDOFF_FILE}`);
     await holdForHandoff();
   } catch (error) {
     const diagnostics = await captureDiagnostics(page, "permit-reservation-error");
+    const currentUrl = page.url();
+    await page.bringToFront().catch(() => {});
     console.error("");
     console.error(error.message);
+    console.error(`Current browser URL: ${currentUrl}`);
     console.error(`Saved diagnostics to ${diagnostics.pngPath} and ${diagnostics.htmlPath}`);
+    await holdForHandoff();
     throw error;
   } finally {
     await context.close().catch(() => {});
