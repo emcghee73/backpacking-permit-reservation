@@ -76,10 +76,16 @@ function bySelector(selector) {
   return { kind: "selector", selector };
 }
 
+// A group of radio inputs; the option is chosen later by its label text.
+function byRadioGroup(selector) {
+  return { kind: "radiogroup", selector };
+}
+
 const FIELD_CONFIG = {
   permitHolderFirstName: {
     description: "permit holder first name",
     strategies: [
+      bySelector("input#first_name"),
       byLabel("Permit Holder First Name", false),
       byLabel("Reservation Holder First Name", false),
       byLabel("Primary Permit Holder First Name", false),
@@ -98,6 +104,7 @@ const FIELD_CONFIG = {
   permitHolderLastName: {
     description: "permit holder last name",
     strategies: [
+      bySelector("input#last_name"),
       byLabel("Permit Holder Last Name", false),
       byLabel("Reservation Holder Last Name", false),
       byLabel("Primary Permit Holder Last Name", false),
@@ -116,6 +123,7 @@ const FIELD_CONFIG = {
   permitHolderEmail: {
     description: "permit holder email",
     strategies: [
+      bySelector("input#email"),
       byLabel("Permit Holder Email", false),
       byLabel("Email Address", false),
       byLabel("Email", false),
@@ -131,6 +139,7 @@ const FIELD_CONFIG = {
   permitHolderPhone: {
     description: "permit holder phone number",
     strategies: [
+      bySelector("input#cell_phone_req"),
       byLabel("Permit Holder Phone", false),
       byLabel("Phone Number", false),
       byLabel("Phone", false),
@@ -146,6 +155,8 @@ const FIELD_CONFIG = {
   permitHolderAddress: {
     description: "permit holder address",
     strategies: [
+      bySelector("input#address1"),
+      byLabel("Street Address", false),
       byLabel("Address", false),
       byLabel("Mailing Address", false),
       bySelector('textarea[name*="address"]'),
@@ -160,6 +171,7 @@ const FIELD_CONFIG = {
   emergencyFirstName: {
     description: "emergency contact first name",
     strategies: [
+      bySelector("input#emergency-contact-firstname"),
       byLabel("Emergency Contact First Name", false),
       bySelector('input[name*="emergency"][name*="first"]'),
       bySelector('input[name*="contact"][name*="first"]'),
@@ -173,6 +185,7 @@ const FIELD_CONFIG = {
   emergencyLastName: {
     description: "emergency contact last name",
     strategies: [
+      bySelector("input#emergency-contact-lastname"),
       byLabel("Emergency Contact Last Name", false),
       bySelector('input[name*="emergency"][name*="last"]'),
       bySelector('input[name*="contact"][name*="last"]'),
@@ -186,6 +199,7 @@ const FIELD_CONFIG = {
   emergencyPhone: {
     description: "emergency contact phone number",
     strategies: [
+      bySelector("input#emergency-contact-phone-num"),
       byLabel("Emergency Contact Phone", false),
       byLabel("Emergency Contact Phone Number", false),
       bySelector('input[name*="emergency"][name*="phone"]'),
@@ -200,6 +214,7 @@ const FIELD_CONFIG = {
   travelMethod: {
     description: "travel method",
     strategies: [
+      bySelector("select#travel-method"),
       byLabel("Travel Method", false),
       byLabel("Method of Travel", false),
       bySelector('select[name*="travel"]'),
@@ -214,6 +229,7 @@ const FIELD_CONFIG = {
   animals: {
     description: "animals selection",
     strategies: [
+      byRadioGroup('input[type="radio"][name*="animal"]'),
       byLabel("Animals", false),
       byLabel("Pack Animals", false),
       bySelector('select[name*="animal"]'),
@@ -228,7 +244,9 @@ const FIELD_CONFIG = {
   issuingStation: {
     description: "issuing station",
     strategies: [
+      bySelector("select#issue-station"),
       byLabel("Issuing Station", false),
+      byLabel("Station Location", false),
       byLabel("Permit Issuing Station", false),
       bySelector('select[name*="station"]'),
       bySelector('select[name*="issue"]'),
@@ -243,6 +261,7 @@ const FIELD_CONFIG = {
   lateArrival: {
     description: "late arrival",
     strategies: [
+      byRadioGroup('input[type="radio"][name*="late-arrival"]'),
       byLabel("Late Arrival", false),
       byLabel("Late Arrival?", false),
       bySelector('select[name*="late"]'),
@@ -256,6 +275,7 @@ const FIELD_CONFIG = {
   needToKnowAgreement: {
     description: "Need to Know agreement",
     strategies: [
+      bySelector("input#need-to-know"),
       byRole("checkbox", "Yes, I have read and agree to the Need to Know information.", false),
       byLabel("Yes, I have read and agree to the Need to Know information.", false),
       byRole("radio", "Yes, I have read and agree to the Need to Know information.", false),
@@ -1179,13 +1199,18 @@ async function findDirectLocator(page, config) {
   // Evaluate every strategy concurrently (one round trip each, all in flight at
   // once) and keep the first one, in priority order, that matches exactly one
   // visible element.
-  const candidates = config.strategies.map((strategy) =>
-    resolveStrategyLocator(page, strategy).filter({ visible: true })
-  );
+  const candidates = config.strategies.map((strategy) => {
+    const locator = resolveStrategyLocator(page, strategy);
+    // Styled radio inputs are often visually hidden behind their labels, so
+    // radio groups are matched without the visibility filter.
+    return strategy.kind === "radiogroup" ? locator : locator.filter({ visible: true });
+  });
   const counts = await Promise.all(
     candidates.map((candidate) => candidate.count().catch(() => 0))
   );
-  const index = counts.findIndex((count) => count === 1);
+  const index = counts.findIndex((count, position) =>
+    config.strategies[position].kind === "radiogroup" ? count >= 1 : count === 1
+  );
   return index === -1 ? null : candidates[index];
 }
 
@@ -1348,25 +1373,39 @@ function scoreControl(control, config) {
   return bestScore;
 }
 
+function invalidateFormControlInventory(page) {
+  getFieldResolutionCache(page).controlInventory = null;
+}
+
 async function findFuzzyLocator(page, config) {
-  const controls = await getFormControlInventory(page);
-  const scored = controls
-    .map((control) => ({
-      control,
-      score: scoreControl(control, config),
-    }))
-    .filter((item) => Number.isFinite(item.score) && item.score >= 12)
-    .sort((left, right) => right.score - left.score);
+  // The inventory is cached per URL, but a client-rendered page can change
+  // its controls without changing its URL (for example while the reservation
+  // form is still loading). If the cached inventory yields nothing usable,
+  // rebuild it once and try again.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controls = await getFormControlInventory(page);
+    const scored = controls
+      .map((control) => ({
+        control,
+        score: scoreControl(control, config),
+      }))
+      .filter((item) => Number.isFinite(item.score) && item.score >= 12)
+      .sort((left, right) => right.score - left.score);
 
-  if (scored.length === 0) {
-    return null;
+    const ambiguous = scored.length > 1 && scored[0].score - scored[1].score < 3;
+    if (scored.length > 0 && !ambiguous) {
+      const locator = page.locator(
+        `[data-permit-automation-id="${scored[0].control.automationId}"]`
+      );
+      if ((await locator.count().catch(() => 0)) > 0) {
+        return locator;
+      }
+    }
+
+    invalidateFormControlInventory(page);
   }
 
-  if (scored.length > 1 && scored[0].score - scored[1].score < 3) {
-    return null;
-  }
-
-  return page.locator(`[data-permit-automation-id="${scored[0].control.automationId}"]`);
+  return null;
 }
 
 async function resolveFieldLocator(page, fieldKey) {
@@ -1405,7 +1444,7 @@ async function getElementMeta(locator) {
   }));
 }
 
-async function fillTextLikeField(page, fieldKey, value) {
+async function fillTextLikeField(page, fieldKey, value, { keepExisting = false } = {}) {
   const locator = await resolveFieldLocator(page, fieldKey);
   if (!locator) {
     throw new Error(`Unable to find the ${FIELD_CONFIG[fieldKey].description} field.`);
@@ -1415,10 +1454,41 @@ async function fillTextLikeField(page, fieldKey, value) {
 
   if (meta.tagName === "select") {
     await locator.selectOption({ label: value });
-    return;
+    return "selected";
+  }
+
+  if (keepExisting) {
+    const existing = normalizeText(await locator.inputValue().catch(() => ""));
+    if (existing) {
+      return "kept";
+    }
   }
 
   await locator.fill(value);
+  return "filled";
+}
+
+// Checks a checkbox or radio input. Recreation.gov hides the real input
+// behind a styled label, so if a direct check fails, click the label instead.
+async function checkControl(page, locator) {
+  const alreadyChecked = await locator.isChecked().catch(() => false);
+  if (alreadyChecked) {
+    return;
+  }
+
+  try {
+    await locator.check({ timeout: 3000 });
+  } catch {
+    const id = await locator.getAttribute("id").catch(() => null);
+    if (!id) {
+      throw new Error("The control is not clickable and has no label to click instead.");
+    }
+    await page.locator(`label[for="${id.replace(/"/g, '\\"')}"]`).first().click();
+  }
+
+  if (!(await locator.isChecked().catch(() => false))) {
+    throw new Error("The control did not become checked.");
+  }
 }
 
 async function promptRequiredSecret(question) {
@@ -1437,10 +1507,29 @@ async function selectChoiceField(page, fieldKey, value) {
     throw new Error(`Unable to find the ${FIELD_CONFIG[fieldKey].description} control.`);
   }
 
+  const matchCount = await locator.count().catch(() => 0);
+  if (matchCount > 1) {
+    // A radio group: pick the option whose label matches the value.
+    const option = locator.and(page.getByLabel(value, { exact: true }));
+    if ((await option.count().catch(() => 0)) === 1) {
+      await checkControl(page, option);
+      return;
+    }
+
+    throw new Error(
+      `Found the ${FIELD_CONFIG[fieldKey].description} options, but none was labeled "${value}".`
+    );
+  }
+
   const meta = await getElementMeta(locator);
 
   if (meta.tagName === "select") {
     await locator.selectOption({ label: value });
+    return;
+  }
+
+  if (meta.type === "radio" || meta.type === "checkbox") {
+    await checkControl(page, locator);
     return;
   }
 
@@ -1494,7 +1583,7 @@ async function acceptNeedToKnow(page) {
 
   const meta = await getElementMeta(locator);
   if (meta.type === "checkbox" || meta.type === "radio") {
-    await locator.check();
+    await checkControl(page, locator);
     return;
   }
 
@@ -2008,7 +2097,20 @@ async function fillReservationForm(page, request) {
   await fillTextLikeField(page, "permitHolderLastName", request.permitHolder.lastName);
   await fillTextLikeField(page, "permitHolderEmail", request.permitHolder.email);
   await fillTextLikeField(page, "permitHolderPhone", request.permitHolder.phone);
-  await fillTextLikeField(page, "permitHolderAddress", request.permitHolder.address);
+  // Recreation.gov pre-fills a structured address (street, city, state, zip)
+  // from the account. A single typed address line cannot be split reliably,
+  // so keep a pre-filled street address rather than overwrite it.
+  const addressResult = await fillTextLikeField(
+    page,
+    "permitHolderAddress",
+    request.permitHolder.address,
+    { keepExisting: true }
+  );
+  if (addressResult === "kept") {
+    console.log("Address was already filled from your Recreation.gov account; leaving it unchanged.");
+  } else if (addressResult === "filled") {
+    console.log("Entered the address into the street address field; check city, state, and zip after handoff.");
+  }
 
   await applyChoiceField(
     page,
