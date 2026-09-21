@@ -27,6 +27,9 @@ const GROUP_MEMBERS_BUTTON_NAME = /^(Add Group Members\.\.\.|\d+ Group Members?)
 // the scheduled start). The grid does not update on its own.
 const AVAILABILITY_RETRY_WINDOW_MS = 2 * 60 * 1000;
 const AVAILABILITY_RETRY_PAUSE_MS = 750;
+// A small resource on Recreation.gov used only to read the server's clock
+// from the HTTP Date header.
+const CLOCK_PROBE_URL = "https://www.recreation.gov/robots.txt";
 
 const FACILITIES = {
   yosemite: {
@@ -462,6 +465,80 @@ function formatInstantInTimeZone(date, timeZone) {
     hour12: true,
     timeZoneName: "short",
   }).format(date);
+}
+
+async function sampleServerClock(url) {
+  const sentAt = Date.now();
+  const response = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+    headers: { "cache-control": "no-cache", pragma: "no-cache" },
+    signal: AbortSignal.timeout(4000),
+  });
+  const receivedAt = Date.now();
+  await response.arrayBuffer().catch(() => {});
+
+  // Recreation.gov sits behind a CDN that may serve a cached copy, whose
+  // Date header is frozen at the time it was cached. The CDN's Age header
+  // says how many seconds ago that was, so Date + Age is the CDN's current
+  // clock. For an uncached response Age is absent and counts as zero.
+  const dateMs = Date.parse(response.headers.get("date") ?? "");
+  const ageSeconds = Number(response.headers.get("age") ?? 0);
+  if (!Number.isFinite(dateMs) || !Number.isFinite(ageSeconds)) {
+    throw new Error("The response did not include a usable Date header.");
+  }
+
+  return { sentAt, receivedAt, serverMs: dateMs + ageSeconds * 1000 };
+}
+
+// Measures how far the server's clock is from this machine's clock, in ms
+// (positive when the server is ahead). The headers only carry whole
+// seconds, so this polls until the server's second ticks over; the tick
+// pins the server's second boundary to within roughly one round trip.
+async function measureServerClockOffset(url = CLOCK_PROBE_URL) {
+  const samples = [];
+  const deadline = Date.now() + 2500;
+  let previous = await sampleServerClock(url);
+  samples.push(previous);
+
+  while (Date.now() < deadline) {
+    await sleep(40);
+    const current = await sampleServerClock(url);
+    samples.push(current);
+
+    if (current.serverMs > previous.serverMs) {
+      // The server's clock ticked to a new second somewhere between the
+      // previous request being handled and this one being handled.
+      const earliestLocal = previous.sentAt;
+      const latestLocal = current.receivedAt;
+      const boundaryLocal = (earliestLocal + latestLocal) / 2;
+      return {
+        offsetMs: Math.round(current.serverMs - boundaryLocal),
+        uncertaintyMs: Math.ceil((latestLocal - earliestLocal) / 2),
+        samples: samples.length,
+      };
+    }
+
+    previous = current;
+  }
+
+  // No tick observed (unexpected). Fall back to a whole-second estimate.
+  const estimates = samples
+    .map((sample) => sample.serverMs + 500 - (sample.sentAt + sample.receivedAt) / 2)
+    .sort((left, right) => left - right);
+  return {
+    offsetMs: Math.round(estimates[Math.floor(estimates.length / 2)]),
+    uncertaintyMs: 500,
+    samples: samples.length,
+  };
+}
+
+function describeClockOffset(offsetMs) {
+  if (Math.abs(offsetMs) < 1) {
+    return "in sync with this computer";
+  }
+
+  return `${formatDuration(Math.abs(offsetMs))} ${offsetMs > 0 ? "ahead of" : "behind"} this computer`;
 }
 
 function formatClockTime(date, timeZone) {
@@ -1157,23 +1234,49 @@ async function waitForPrewarmWindow(runPlan) {
   return true;
 }
 
-async function waitForRunPlan(runPlan) {
+// Waits for the scheduled instant. When a server clock offset is known, the
+// wait targets the moment Recreation.gov's clock reads the scheduled time.
+async function waitForRunPlan(runPlan, { serverClockOffsetMs = 0 } = {}) {
   const targetMs = getRunPlanTargetMs(runPlan);
   if (targetMs === null) {
     return;
   }
 
+  const localTargetMs = targetMs - serverClockOffsetMs;
   console.log("");
   console.log(
     `Waiting until ${formatInstantInTimeZone(new Date(targetMs), runPlan.timeZone)} (${runPlan.timeZone}) to begin...`
   );
 
-  await waitUntil(targetMs);
+  await waitUntil(localTargetMs);
 
+  const now = new Date();
   console.log("");
-  console.log(
-    `Starting now at ${formatInstantInTimeZone(new Date(), runPlan.timeZone)} (${runPlan.timeZone}).`
-  );
+  if (serverClockOffsetMs !== 0) {
+    console.log(
+      `Starting now at ${formatClockTime(new Date(now.getTime() + serverClockOffsetMs), runPlan.timeZone)} by Recreation.gov's clock (${formatClockTime(now, runPlan.timeZone)} on this computer).`
+    );
+  } else {
+    console.log(
+      `Starting now at ${formatClockTime(now, runPlan.timeZone)} (${runPlan.timeZone}).`
+    );
+  }
+}
+
+async function measureServerClockOffsetForRun() {
+  console.log("Checking Recreation.gov's clock against this computer...");
+  try {
+    const result = await measureServerClockOffset();
+    console.log(
+      `Recreation.gov's clock is ${describeClockOffset(result.offsetMs)} (within about ${formatDuration(result.uncertaintyMs)}). The scheduled start will follow Recreation.gov's clock.`
+    );
+    return result.offsetMs;
+  } catch (error) {
+    console.log(
+      `Could not read Recreation.gov's clock (${error.message}). The scheduled start will follow this computer's clock.`
+    );
+    return 0;
+  }
 }
 
 async function isVisible(locator) {
@@ -2281,8 +2384,9 @@ export async function main() {
       timing.mark("prewarmStart");
       await ensureSignedIn(page, request);
       timing.mark("prewarmReady");
+      const serverClockOffsetMs = await measureServerClockOffsetForRun();
       console.log("Browser is open and signed in; holding for the scheduled start.");
-      await waitForRunPlan(request.runPlan);
+      await waitForRunPlan(request.runPlan, { serverClockOffsetMs });
       timing.mark("websiteStart");
       await refreshAvailabilityPage(page, request);
     } else {
@@ -2349,6 +2453,7 @@ export const internals = {
   waitForPrewarmWindow,
   waitForRunPlan,
   getRunPlanTargetMs,
+  measureServerClockOffset,
   waitForReservationForm,
   fillReservationForm,
   selectTrailheadByPriority,

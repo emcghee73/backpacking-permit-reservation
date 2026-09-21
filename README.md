@@ -95,6 +95,7 @@ When you run it this way, the program stores its working files in the folder you
 - For Inyo, attempts the same fixed values when matching controls are present on the reservation form
 - Checks the `Need to Know` agreement when the site exposes a matching control
 - If you choose a later run time, waits inside the CLI until 90 seconds before the requested date, time, and time zone, then opens the browser and signs in ahead of time
+- After signing in, reads Recreation.gov's clock from its web responses, reports how far it is from this computer's clock, and times the scheduled start by Recreation.gov's clock
 - At the scheduled moment it reloads the availability grid so the data is fresh, then continues straight to entry point selection
 - Leaves the browser open and prints the current handoff URL
 - Prints a timing breakdown for the website-interaction portion of the run, from the first Recreation.gov page load to handoff, including the time from the start of website entry to the moment a trailhead is selected
@@ -114,6 +115,7 @@ When you run it this way, the program stores its working files in the folder you
 - The timing summary shown at the end measures only the website-interaction portion of the run. It does not include the time you spend answering prompts before the browser starts.
 - For a scheduled run, the early browser warm-up and sign-in are reported on their own line and are not counted in the total to handoff.
 - The availability grid only fetches data when the page loads or the date changes; it does not refresh itself. A scheduled run reloads the grid at the scheduled moment and, if the requested entry points are not yet released, keeps reloading for up to two minutes. Schedule the run for the release time itself, not earlier.
+- The scheduled start is timed against Recreation.gov's own clock, measured to within a fraction of a second during the warm-up, so this computer's clock does not need to be exact. If the clock check fails, the app says so and falls back to this computer's clock.
 - Use the visible entry point names from the Recreation.gov availability grid when entering your priorities.
 - The program shows a numbered review of everything you entered and lets you correct one item at a time before the browser opens.
 - For scheduled runs, the time-zone prompt now defaults to `America/Los_Angeles`.
