@@ -70,7 +70,27 @@ const FACILITIES = {
       lateArrival: { value: "Yes", required: false },
     },
   },
+  paria: {
+    key: "paria",
+    label: "Paria Canyon",
+    permitUrl: "https://www.recreation.gov/permits/74984",
+    buildAvailabilityUrl: (entryDate) =>
+      `https://www.recreation.gov/permits/74984/registration/detailed-availability?date=${entryDate}&type=overnight-permit`,
+    trailheadNameSuffixes: [],
+    // Paria Canyon's grid has a single row rather than a list of entry points,
+    // so there is nothing to prioritize; the row name is fixed.
+    fixedTrailheads: [{ name: "Paria Canyon Overnight" }],
+    fixedDetails: {
+      travelMethod: { value: "Foot", required: false },
+      animals: { value: "No", required: false },
+      issuingStation: { value: "", required: false },
+      lateArrival: { value: "Yes", required: false },
+    },
+  },
 };
+
+// Order in which destinations are offered at the prompt.
+const DESTINATION_ORDER = ["yosemite", "inyo", "paria"];
 
 function byLabel(text, exact = false) {
   return { kind: "label", text, exact };
@@ -937,14 +957,37 @@ async function readTrailheadRows(rowsLocator) {
     .catch(() => []);
 }
 
-async function promptDestination() {
-  const choice = await promptChoice(
-    "Where do you want to go?",
-    ["Yosemite", "Inyo"],
-    "Yosemite"
-  );
+async function promptDestination(defaultKey = DESTINATION_ORDER[0]) {
+  const destinations = DESTINATION_ORDER.map((key) => FACILITIES[key]);
+  const defaultNumber = Math.max(1, DESTINATION_ORDER.indexOf(defaultKey) + 1);
 
-  return FACILITIES[choice.toLowerCase()];
+  console.log("Where do you want to go?");
+  for (const [index, destination] of destinations.entries()) {
+    console.log(`  ${index + 1}) ${destination.label}`);
+  }
+
+  while (true) {
+    const answer = await prompt("Enter the number of your destination", String(defaultNumber));
+    const number = Number.parseInt(answer, 10);
+    if (Number.isInteger(number) && number >= 1 && number <= destinations.length) {
+      return destinations[number - 1];
+    }
+
+    const byName = destinations.find(
+      (destination) => destination.label.toLowerCase() === answer.toLowerCase()
+    );
+    if (byName) {
+      return byName;
+    }
+
+    console.log(`Enter a number from 1 to ${destinations.length}.`);
+  }
+}
+
+function trailheadsForDestination(destination) {
+  return destination.fixedTrailheads
+    ? destination.fixedTrailheads.map((trailhead) => ({ ...trailhead }))
+    : null;
 }
 
 async function promptTrailheads() {
@@ -973,7 +1016,18 @@ function buildRequestReviewItems(request) {
       label: "Destination",
       display: () => request.destination.label,
       edit: async () => {
-        request.destination = await promptDestination();
+        const previous = request.destination;
+        request.destination = await promptDestination(previous.key);
+        if (request.destination.key === previous.key) {
+          return;
+        }
+
+        const fixed = trailheadsForDestination(request.destination);
+        if (fixed) {
+          request.trailheads = fixed;
+        } else if (previous.fixedTrailheads) {
+          request.trailheads = await promptTrailheads();
+        }
       },
     },
     {
@@ -1010,8 +1064,17 @@ function buildRequestReviewItems(request) {
     },
     {
       label: "Entry point names in priority order",
-      display: () => formatTrailheads(request.trailheads),
+      display: () =>
+        request.destination.fixedTrailheads
+          ? `${formatTrailheads(request.trailheads)} (fixed for ${request.destination.label})`
+          : formatTrailheads(request.trailheads),
       edit: async () => {
+        if (request.destination.fixedTrailheads) {
+          console.log(
+            `${request.destination.label} has a single permit area, so there are no entry points to choose.`
+          );
+          return;
+        }
         request.trailheads = await promptTrailheads();
       },
     },
@@ -1159,7 +1222,7 @@ async function collectPermitRequest() {
 
   const groupSize = await promptPositiveInteger("Number of people on the permit");
   const entryDate = await promptDate("Entry date");
-  const trailheads = await promptTrailheads();
+  const trailheads = trailheadsForDestination(destination) ?? (await promptTrailheads());
 
   const permitHolder = {
     firstName: await promptRequired("Permit holder first name"),
@@ -2456,6 +2519,8 @@ export async function main() {
 
 export const internals = {
   FACILITIES,
+  DESTINATION_ORDER,
+  promptDestination,
   FIELD_CONFIG,
   getTrailheadRowInventory,
   findTrailheadRow,

@@ -1,6 +1,6 @@
 # Backpacking Permit Reservation
 
-This project is a Playwright-based CLI for preparing a Yosemite or Inyo wilderness permit reservation on Recreation.gov and stopping at a live browser handoff point so you can finish the booking manually.
+This project is a Playwright-based CLI for preparing a Yosemite, Inyo, or Paria Canyon wilderness permit reservation on Recreation.gov and stopping at a live browser handoff point so you can finish the booking manually.
 
 ## Requirements
 
@@ -64,11 +64,11 @@ When you run it this way, the program stores its working files in the folder you
 
 ## What The Program Prompts For
 
-- Destination: `Yosemite` or `Inyo`
+- Destination, chosen by number from a list: `1) Yosemite`, `2) Inyo`, `3) Paria Canyon`
 - Recreation.gov login email and password
 - Group size
 - Entry date in `YYYY-MM-DD` format
-- Entry point names in priority order
+- Entry point names in priority order (skipped for Paria Canyon, which has a single permit area)
 - Permit-holder first name
 - Permit-holder last name
 - Permit-holder email
@@ -80,7 +80,7 @@ When you run it this way, the program stores its working files in the folder you
 ## What It Automates
 
 - Signs into Recreation.gov
-- Opens the correct Recreation.gov permit flow for Yosemite or Inyo
+- Opens the correct Recreation.gov permit flow for Yosemite, Inyo, or Paria Canyon
 - For Inyo, selects `No` for the commercial-guided-trip question and `Overnight` for permit type before using the availability grid
 - Sets the requested group size
 - Tries your entry point priorities in order for the requested entry date
@@ -92,7 +92,8 @@ When you run it this way, the program stores its working files in the folder you
   - `Animals = No`
   - `Issuing Station = Tuolumne Meadows Wilderness Center`
   - `Late Arrival = Yes`
-- For Inyo, attempts the same fixed values when matching controls are present on the reservation form
+- For Inyo and Paria Canyon, attempts the same fixed values when matching controls are present on the reservation form
+- For Paria Canyon, books the single `Paria Canyon Overnight` row for the entry date; there are no entry points to prioritize
 - Checks the `Need to Know` agreement when the site exposes a matching control
 - If you choose a later run time, waits inside the CLI until 90 seconds before the requested date, time, and time zone, then opens the browser and signs in ahead of time
 - After signing in, reads Recreation.gov's clock from its web responses, reports how far it is from this computer's clock, and times the scheduled start by Recreation.gov's clock
