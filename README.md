@@ -94,7 +94,8 @@ When you run it this way, the program stores its working files in the folder you
   - `Late Arrival = Yes`
 - For Inyo, attempts the same fixed values when matching controls are present on the reservation form
 - Checks the `Need to Know` agreement when the site exposes a matching control
-- If you choose a later run time, waits inside the CLI until the requested date, time, and time zone and then starts the browser flow
+- If you choose a later run time, waits inside the CLI until 90 seconds before the requested date, time, and time zone, then opens the browser and signs in ahead of time
+- At the scheduled moment it reloads the availability grid so the data is fresh, then continues straight to entry point selection
 - Leaves the browser open and prints the current handoff URL
 - Prints a timing breakdown for the website-interaction portion of the run, from the first Recreation.gov page load to handoff
 
@@ -110,10 +111,12 @@ When you run it this way, the program stores its working files in the folder you
 
 - The reliable handoff is the still-open browser window in the same logged-in session; the printed URL is only a convenience.
 - The timing summary shown at the end measures only the website-interaction portion of the run. It does not include the time you spend answering prompts before the browser starts.
+- For a scheduled run, the early browser warm-up and sign-in are reported on their own line and are not counted in the total to handoff.
 - Use the visible entry point names from the Recreation.gov availability grid when entering your priorities.
 - The program shows a numbered review of everything you entered and lets you correct one item at a time before the browser opens.
 - For scheduled runs, the time-zone prompt now defaults to `America/Los_Angeles`.
 - If you schedule a later run, keep the Terminal session open so the CLI can keep waiting and then start on time.
+- For a scheduled run the browser opens and signs in about 90 seconds early. If Recreation.gov asks for extra sign-in verification at that point, complete it in the browser and press Enter in Terminal before the scheduled time.
 - If you schedule a later run, the computer itself must stay awake. A sleeping Mac will pause the wait timer. The display can turn off, but the machine cannot sleep or close its lid.
 - On a Mac, one simple way to keep it awake during a scheduled run is:
 

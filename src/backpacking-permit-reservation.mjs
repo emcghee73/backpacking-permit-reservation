@@ -15,6 +15,13 @@ const DIAGNOSTIC_DIR = path.resolve(RUNTIME_DIR, "diagnostics");
 const HANDOFF_FILE = path.resolve(RUNTIME_DIR, "handoff-url.txt");
 const DEFAULT_RUN_TIME_ZONE = "America/Los_Angeles";
 const FIELD_RESOLUTION_CACHE = new WeakMap();
+// For scheduled runs, open the browser and sign in this far ahead of the
+// requested start so that only the availability reload sits on the critical path.
+const PREWARM_LEAD_MS = 90 * 1000;
+// The group-size button reads "Add Group Members..." until a size is chosen,
+// then "N Group Members". Recreation.gov remembers the size within a browser
+// session, so a reload can show the second form.
+const GROUP_MEMBERS_BUTTON_NAME = /^(Add Group Members\.\.\.|\d+ Group Members?)$/;
 
 const FACILITIES = {
   yosemite: {
@@ -266,7 +273,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForCondition(check, { timeoutMs, intervalMs = 100 }) {
+// Playwright's built-in waitFor() and action auto-waits retry on a backoff
+// that grows to 500 ms, so a change that lands after ~300 ms is only noticed
+// up to half a second later. For time-critical waits we poll a single cheap
+// count() call from Node instead, which notices changes within ~50 ms.
+async function waitForCondition(check, { timeoutMs, intervalMs = 50 }) {
   const deadline = Date.now() + timeoutMs;
 
   while (true) {
@@ -282,6 +293,16 @@ async function waitForCondition(check, { timeoutMs, intervalMs = 100 }) {
 
     await sleep(Math.min(intervalMs, remainingMs));
   }
+}
+
+async function waitForLocatorPresence(locator, { timeoutMs, intervalMs = 50, present = true }) {
+  return await waitForCondition(
+    async () => {
+      const count = await locator.count().catch(() => 0);
+      return present ? count > 0 : count === 0;
+    },
+    { timeoutMs, intervalMs }
+  );
 }
 
 function createTimingTracker() {
@@ -746,31 +767,16 @@ function maskSecret(value) {
   return "*".repeat(Math.max(value.length, 8));
 }
 
-async function getTrailheadDisplayName(row, destination) {
-  const nameButton = row.locator("button[aria-label]:not(.rec-availability-date)");
-  const nameButtonCount = await nameButton.count().catch(() => 0);
-  if (nameButtonCount === 1) {
-    const ariaLabel = normalizeText(
-      (await nameButton.getAttribute("aria-label", { timeoutMs: 5000 }).catch(() => "")) ?? ""
-    );
-    if (ariaLabel) {
-      return ariaLabel;
-    }
-
-    const buttonText = normalizeText(
-      await nameButton.innerText({ timeoutMs: 5000 }).catch(() => "")
-    );
-    if (buttonText) {
-      return buttonText;
-    }
+function pickTrailheadDisplayName(rawRow, destination) {
+  if (rawRow.ariaLabel) {
+    return rawRow.ariaLabel;
   }
 
-  const cells = row.locator('[role="gridcell"]');
-  const cellCount = await cells.count().catch(() => 0);
-  for (let index = 0; index < cellCount; index += 1) {
-    const cellText = normalizeText(
-      await cells.nth(index).innerText({ timeoutMs: 5000 }).catch(() => "")
-    );
+  if (rawRow.buttonText) {
+    return rawRow.buttonText;
+  }
+
+  for (const cellText of rawRow.cellTexts) {
     const strippedCellText = stripTrailheadSuffixes(cellText, destination);
     if (!strippedCellText || /^\d+$/.test(strippedCellText)) {
       continue;
@@ -779,6 +785,35 @@ async function getTrailheadDisplayName(row, destination) {
   }
 
   return "";
+}
+
+// Reads the name of every grid row in a single page evaluation. The previous
+// implementation made several Playwright round trips per row, which added
+// seconds on grids with 50+ entry points.
+async function readTrailheadRows(rowsLocator) {
+  return await rowsLocator
+    .evaluateAll((rowElements) => {
+      const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+
+      return rowElements.map((row) => {
+        const cells = Array.from(row.querySelectorAll('[role="gridcell"]'));
+        if (cells.length === 0) {
+          return null;
+        }
+
+        const nameButtons = row.querySelectorAll(
+          "button[aria-label]:not(.rec-availability-date)"
+        );
+        const nameButton = nameButtons.length === 1 ? nameButtons[0] : null;
+        const ariaLabel = nameButton ? normalize(nameButton.getAttribute("aria-label")) : "";
+        const buttonText = nameButton && !ariaLabel ? normalize(nameButton.innerText) : "";
+        const cellTexts =
+          ariaLabel || buttonText ? [] : cells.map((cell) => normalize(cell.innerText));
+
+        return { ariaLabel, buttonText, cellTexts };
+      });
+    })
+    .catch(() => []);
 }
 
 async function promptDestination() {
@@ -1030,21 +1065,19 @@ async function collectPermitRequest() {
   return request;
 }
 
-async function waitForRunPlan(runPlan) {
+function getRunPlanTargetMs(runPlan) {
   if (!runPlan || runPlan.mode !== "later") {
-    return;
+    return null;
   }
 
-  const target = new Date(runPlan.runAtIso);
-  console.log("");
-  console.log(
-    `Waiting until ${formatInstantInTimeZone(target, runPlan.timeZone)} (${runPlan.timeZone}) to begin...`
-  );
+  return new Date(runPlan.runAtIso).getTime();
+}
 
+async function waitUntil(targetMs) {
   while (true) {
-    const remainingMs = target.getTime() - Date.now();
+    const remainingMs = targetMs - Date.now();
     if (remainingMs <= 0) {
-      break;
+      return;
     }
 
     let delayMs = remainingMs;
@@ -1060,6 +1093,38 @@ async function waitForRunPlan(runPlan) {
 
     await sleep(delayMs);
   }
+}
+
+async function waitForPrewarmWindow(runPlan) {
+  const targetMs = getRunPlanTargetMs(runPlan);
+  if (targetMs === null) {
+    return false;
+  }
+
+  const prewarmAtMs = targetMs - PREWARM_LEAD_MS;
+  if (prewarmAtMs > Date.now()) {
+    console.log("");
+    console.log(
+      `Waiting until ${formatInstantInTimeZone(new Date(prewarmAtMs), runPlan.timeZone)} (${runPlan.timeZone}) to open the browser and sign in ahead of the scheduled start...`
+    );
+    await waitUntil(prewarmAtMs);
+  }
+
+  return true;
+}
+
+async function waitForRunPlan(runPlan) {
+  const targetMs = getRunPlanTargetMs(runPlan);
+  if (targetMs === null) {
+    return;
+  }
+
+  console.log("");
+  console.log(
+    `Waiting until ${formatInstantInTimeZone(new Date(targetMs), runPlan.timeZone)} (${runPlan.timeZone}) to begin...`
+  );
+
+  await waitUntil(targetMs);
 
   console.log("");
   console.log(
@@ -1088,7 +1153,7 @@ function getFieldResolutionCache(page) {
   return next;
 }
 
-async function resolveStrategyLocator(page, strategy) {
+function resolveStrategyLocator(page, strategy) {
   if (strategy.kind === "label") {
     return page.getByLabel(strategy.text, { exact: strategy.exact });
   }
@@ -1104,28 +1169,29 @@ async function resolveStrategyLocator(page, strategy) {
 }
 
 async function findDirectLocator(page, config) {
-  for (const strategy of config.strategies) {
-    const locator = await resolveStrategyLocator(page, strategy);
-    const count = await locator.count().catch(() => 0);
-    if (count !== 1) {
-      continue;
-    }
-
-    if (await isVisible(locator)) {
-      return locator;
-    }
-  }
-
-  return null;
+  // Evaluate every strategy concurrently (one round trip each, all in flight at
+  // once) and keep the first one, in priority order, that matches exactly one
+  // visible element.
+  const candidates = config.strategies.map((strategy) =>
+    resolveStrategyLocator(page, strategy).filter({ visible: true })
+  );
+  const counts = await Promise.all(
+    candidates.map((candidate) => candidate.count().catch(() => 0))
+  );
+  const index = counts.findIndex((count) => count === 1);
+  return index === -1 ? null : candidates[index];
 }
 
-async function getFormControlInventory(page) {
+function getFormControlInventory(page) {
   const cache = getFieldResolutionCache(page);
   if (cache.controlInventory) {
     return cache.controlInventory;
   }
 
-  cache.controlInventory = await page.evaluate(() => {
+  // Cache the in-flight promise so concurrent field lookups share one page
+  // evaluation instead of each running their own. A failed evaluation (for
+  // example mid-navigation) is not cached, so the next lookup retries.
+  const inventoryPromise = page.evaluate(() => {
     const elements = Array.from(
       document.querySelectorAll(
         'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="checkbox"], [role="radio"]'
@@ -1224,9 +1290,15 @@ async function getFormControlInventory(page) {
         };
       })
       .filter(Boolean);
+  }).catch(() => {
+    if (cache.controlInventory === inventoryPromise) {
+      cache.controlInventory = null;
+    }
+    return [];
   });
 
-  return cache.controlInventory;
+  cache.controlInventory = inventoryPromise;
+  return inventoryPromise;
 }
 
 function scoreControl(control, config) {
@@ -1373,10 +1445,14 @@ async function selectChoiceField(page, fieldKey, value) {
     page.getByText(value, { exact: true }),
   ];
 
-  const selectedOption = await waitForCondition(
-    async () => await findVisibleLocator(optionCandidates),
-    { timeoutMs: 2000, intervalMs: 50 }
+  // Prefer a real option or radio; fall back to matching text only if none
+  // shows up within the timeout. Then pick by priority order.
+  await waitForLocatorPresence(
+    optionCandidates[0].or(optionCandidates[1]).filter({ visible: true }),
+    { timeoutMs: 2000 }
   );
+
+  const selectedOption = await findVisibleLocator(optionCandidates);
   if (selectedOption) {
     await selectedOption.click();
     return;
@@ -1430,27 +1506,17 @@ async function captureDiagnostics(page, label) {
   return { pngPath, htmlPath };
 }
 
-async function firstVisibleLocator(locator) {
-  const count = await locator.count().catch(() => 0);
-  for (let index = 0; index < count; index += 1) {
-    const candidate = locator.nth(index);
-    if (await isVisible(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 async function findVisibleLocator(candidates) {
-  for (const candidate of candidates) {
-    const visibleCandidate = await firstVisibleLocator(candidate);
-    if (visibleCandidate) {
-      return visibleCandidate;
-    }
-  }
-
-  return null;
+  // One round trip per candidate, all in flight at once, instead of a count
+  // plus a visibility check per matched element.
+  const visibleCandidates = candidates.map((candidate) =>
+    candidate.filter({ visible: true })
+  );
+  const counts = await Promise.all(
+    visibleCandidates.map((candidate) => candidate.count().catch(() => 0))
+  );
+  const index = counts.findIndex((count) => count > 0);
+  return index === -1 ? null : visibleCandidates[index].first();
 }
 
 async function getVisibleLoginForm(page) {
@@ -1519,10 +1585,10 @@ async function submitLoginIfVisible(page, account, reason = "Signing into Recrea
   await loginForm.passwordField.fill(account.password);
   await loginForm.submitButton.click();
 
-  const dismissed = await waitForCondition(
-    async () => !(await getVisibleLoginForm(page)),
-    { timeoutMs: 20000, intervalMs: 100 }
-  );
+  const dismissed = await waitForLocatorPresence(loginForm.passwordField, {
+    timeoutMs: 20000,
+    present: false,
+  });
   if (dismissed) {
     return true;
   }
@@ -1534,9 +1600,40 @@ async function submitLoginIfVisible(page, account, reason = "Signing into Recrea
   return true;
 }
 
+function getAvailabilityShellLocator(page) {
+  // Any of these means the React app has rendered past the loading state:
+  // the group-size button (Yosemite), or the guided-trip radios / permit-type
+  // select that Inyo shows before its grid.
+  return page
+    .getByRole("button", { name: GROUP_MEMBERS_BUTTON_NAME })
+    .or(page.getByRole("radio"))
+    .or(page.locator("select#permit-type"))
+    .filter({ visible: true });
+}
+
+async function waitForAvailabilityShell(page) {
+  const rendered = await waitForLocatorPresence(getAvailabilityShellLocator(page), {
+    timeoutMs: 30000,
+  });
+  if (!rendered) {
+    console.log("The availability page is taking a long time to render; continuing anyway.");
+  }
+}
+
+async function refreshAvailabilityPage(page, request) {
+  console.log("Reloading the availability grid for fresh data...");
+  await page.goto(request.destination.buildAvailabilityUrl(request.entryDate), {
+    waitUntil: "domcontentloaded",
+  });
+}
+
 async function ensureSignedIn(page, request) {
   await ensureAvailabilityPage(page, request);
   await page.bringToFront().catch(() => {});
+  // The page is a client-rendered app; at domcontentloaded the header has not
+  // been drawn yet, so checking for the login button immediately would always
+  // report "already signed in" and push the login to after Book Now.
+  await waitForAvailabilityShell(page);
 
   const loginButton = page.getByRole("button", {
     name: "Sign Up or Log In",
@@ -1572,18 +1669,13 @@ async function setRadioChoice(page, label) {
 
 async function selectVisibleNativeOption(page, selectors, label, description) {
   for (const selector of selectors) {
-    const locator = page.locator(selector);
-    const count = await locator.count().catch(() => 0);
-
-    for (let index = 0; index < count; index += 1) {
-      const candidate = locator.nth(index);
-      if (!(await candidate.isVisible().catch(() => false))) {
-        continue;
-      }
-
-      await candidate.selectOption({ label });
-      return;
+    const candidate = page.locator(selector).filter({ visible: true }).first();
+    if ((await candidate.count().catch(() => 0)) === 0) {
+      continue;
     }
+
+    await candidate.selectOption({ label });
+    return;
   }
 
   throw new Error(`Unable to find the ${description} control.`);
@@ -1612,8 +1704,7 @@ async function prepareAvailabilityGrid(page, request) {
 async function setGroupSize(page, groupSize) {
   console.log(`Setting group size to ${groupSize}...`);
   const groupMembersButton = page.getByRole("button", {
-    name: "Add Group Members...",
-    exact: true,
+    name: GROUP_MEMBERS_BUTTON_NAME,
   });
 
   await groupMembersButton.click();
@@ -1629,13 +1720,10 @@ async function setGroupSize(page, groupSize) {
     exact: true,
   });
 
-  const closed = await waitForCondition(
-    async () => !(await isVisible(infoHeading)),
-    { timeoutMs: 15000, intervalMs: 100 }
-  );
-  if (closed) {
-    return;
-  }
+  await waitForLocatorPresence(infoHeading.filter({ visible: true }), {
+    timeoutMs: 15000,
+    present: false,
+  });
 }
 
 async function ensureEntryDate(page, entryDate) {
@@ -1667,10 +1755,7 @@ async function ensureEntryDate(page, entryDate) {
   await yearField.fill(year);
   await yearField.press("Tab").catch(() => {});
 
-  const updated = await waitForCondition(
-    async () => (await matchingHeader.count().catch(() => 0)) > 0,
-    { timeoutMs: 15000, intervalMs: 100 }
-  );
+  const updated = await waitForLocatorPresence(matchingHeader, { timeoutMs: 15000 });
   if (updated) {
     return;
   }
@@ -1680,18 +1765,20 @@ async function ensureEntryDate(page, entryDate) {
 
 async function getTrailheadRowInventory(page, destination) {
   const rows = page.locator('[role="row"]');
-  const rowCount = await rows.count().catch(() => 0);
+  // The grid fetches its rows after the group size is set; give the first
+  // data row a moment to attach so we do not read an empty grid.
+  await waitForLocatorPresence(rows.filter({ has: page.locator('[role="gridcell"]') }), {
+    timeoutMs: 10000,
+  });
+  const rawRows = await readTrailheadRows(rows);
   const inventory = [];
 
-  for (let index = 0; index < rowCount; index += 1) {
-    const row = rows.nth(index);
-    const cells = row.locator('[role="gridcell"]');
-    const cellCount = await cells.count().catch(() => 0);
-    if (cellCount === 0) {
+  for (const [index, rawRow] of rawRows.entries()) {
+    if (!rawRow) {
       continue;
     }
 
-    const displayName = await getTrailheadDisplayName(row, destination);
+    const displayName = pickTrailheadDisplayName(rawRow, destination);
     const normalizedName = normalizeTrailheadName(displayName, destination);
 
     if (!normalizedName) {
@@ -1701,7 +1788,7 @@ async function getTrailheadRowInventory(page, destination) {
     inventory.push({
       displayName,
       normalizedName,
-      row,
+      row: rows.nth(index),
     });
   }
 
@@ -1738,9 +1825,10 @@ async function selectTrailheadByPriority(page, request) {
     request.destination
   );
   const dateToken = buildDateButtonToken(request.entryDate);
-  const bookNowButton = page.getByRole("button", {
+  const bookNowEnabledButton = page.getByRole("button", {
     name: "Book Now",
     exact: true,
+    disabled: false,
   });
   let matchedAtLeastOneTrailhead = false;
 
@@ -1775,10 +1863,7 @@ async function selectTrailheadByPriority(page, request) {
 
     await availabilityButton.click();
 
-    const enabled = await waitForCondition(
-      async () => await bookNowButton.isEnabled().catch(() => false),
-      { timeoutMs: 5000, intervalMs: 100 }
-    );
+    const enabled = await waitForLocatorPresence(bookNowEnabledButton, { timeoutMs: 5000 });
     if (enabled) {
       console.log(`Selected entry point ${matchedTrailhead.displayName}.`);
       return {
@@ -1794,10 +1879,10 @@ async function selectTrailheadByPriority(page, request) {
 
     if (await isVisible(clearDatesButton)) {
       await clearDatesButton.click().catch(() => {});
-      await waitForCondition(
-        async () => !(await bookNowButton.isEnabled().catch(() => false)),
-        { timeoutMs: 1500, intervalMs: 100 }
-      );
+      await waitForLocatorPresence(bookNowEnabledButton, {
+        timeoutMs: 1500,
+        present: false,
+      });
     }
   }
 
@@ -1816,29 +1901,52 @@ async function waitForReservationForm(page, account) {
   const detectionFields = [
     "travelMethod",
     "issuingStation",
+    "permitHolderFirstName",
   ];
 
-  const formVisible = await waitForCondition(async () => {
+  // Fast path: let the browser signal as soon as a labeled form field or a
+  // login password box shows up. The loop below then runs the full (cached,
+  // fuzzy-capable) resolution, so pages with unexpected labels still work.
+  const readySignal = page
+    .getByLabel("Travel Method")
+    .or(page.getByLabel("Issuing Station"))
+    .or(page.getByLabel("Permit Holder First Name"))
+    .or(page.locator('input[type="password"]'))
+    .filter({ visible: true });
+  const deadline = Date.now() + 30000;
+  let previouslySignalled = false;
+  let lastFullCheckMs = 0;
+
+  while (Date.now() < deadline) {
+    const signalled = (await readySignal.count().catch(() => 0)) > 0;
+    const sinceFullCheckMs = Date.now() - lastFullCheckMs;
+    const fullCheckDue =
+      (signalled && !previouslySignalled) || sinceFullCheckMs >= (signalled ? 250 : 1000);
+    previouslySignalled = signalled;
+
+    if (!fullCheckDue) {
+      await sleep(50);
+      continue;
+    }
+
+    lastFullCheckMs = Date.now();
+    let formVisible = false;
     for (const fieldKey of detectionFields) {
       const locator = await resolveFieldLocator(page, fieldKey);
       if (locator && (await isVisible(locator))) {
-        return true;
+        formVisible = true;
+        break;
       }
     }
+    if (formVisible) {
+      return;
+    }
 
-    const loginSubmitted = await submitLoginIfVisible(
+    await submitLoginIfVisible(
       page,
       account,
       "Recreation.gov requested sign-in before opening permit details. Submitting credentials..."
     );
-    if (loginSubmitted) {
-      return false;
-    }
-
-    return false;
-  }, { timeoutMs: 30000, intervalMs: 250 });
-  if (formVisible) {
-    return;
   }
 
   console.log("");
@@ -1865,6 +1973,23 @@ async function continueToDetailsPage(page, account) {
 async function fillReservationForm(page, request) {
   console.log("Filling the reservation form...");
   const fixedDetails = request.destination.fixedDetails;
+
+  // Resolve every field up front, concurrently, so the sequential fills below
+  // hit the locator cache instead of each paying for a full strategy search.
+  await Promise.allSettled(
+    [
+      "permitHolderFirstName",
+      "permitHolderLastName",
+      "permitHolderEmail",
+      "permitHolderPhone",
+      "permitHolderAddress",
+      "travelMethod",
+      "animals",
+      "issuingStation",
+      "lateArrival",
+      "needToKnowAgreement",
+    ].map((fieldKey) => resolveFieldLocator(page, fieldKey))
+  );
 
   await fillTextLikeField(page, "permitHolderFirstName", request.permitHolder.firstName);
   await fillTextLikeField(page, "permitHolderLastName", request.permitHolder.lastName);
@@ -1927,13 +2052,20 @@ function logWebsiteInteractionTiming(timing) {
 
   console.log("");
   console.log("Website interaction timing:");
+  if (timing.has("prewarmStart")) {
+    console.log(
+      `- Browser warm-up and sign-in before the scheduled start (not counted below): ${formatDuration(
+        timing.durationMs("prewarmStart", "prewarmReady")
+      )}`
+    );
+  }
   console.log(
     `- Total to handoff: ${formatDuration(
       timing.durationMs("websiteStart", "handoffReady")
     )}`
   );
   console.log(
-    `- Sign in and reach availability grid: ${formatDuration(
+    `- ${timing.has("prewarmStart") ? "Reload availability grid" : "Sign in and reach availability grid"}: ${formatDuration(
       timing.durationMs("websiteStart", "signedIn")
     )}`
   );
@@ -1957,13 +2089,25 @@ function logWebsiteInteractionTiming(timing) {
 export async function main() {
   const timing = createTimingTracker();
   const request = await collectPermitRequest();
-  await waitForRunPlan(request.runPlan);
+  const prewarm = await waitForPrewarmWindow(request.runPlan);
   const context = await launchBrowser();
   const page = context.pages()[0] ?? (await context.newPage());
   page.setDefaultTimeout(20000);
 
   try {
-    timing.mark("websiteStart");
+    if (prewarm) {
+      // Scheduled run: get the browser open and signed in ahead of time, then
+      // reload the grid at the requested moment so the data is fresh.
+      timing.mark("prewarmStart");
+      await ensureSignedIn(page, request);
+      timing.mark("prewarmReady");
+      console.log("Browser is open and signed in; holding for the scheduled start.");
+      await waitForRunPlan(request.runPlan);
+      timing.mark("websiteStart");
+      await refreshAvailabilityPage(page, request);
+    } else {
+      timing.mark("websiteStart");
+    }
     await ensureSignedIn(page, request);
     timing.mark("signedIn");
     const selectedTrailhead = await selectTrailheadByPriority(page, request);
@@ -2004,6 +2148,25 @@ export async function main() {
     await context.close().catch(() => {});
   }
 }
+
+export const internals = {
+  FACILITIES,
+  FIELD_CONFIG,
+  getTrailheadRowInventory,
+  findTrailheadRow,
+  resolveFieldLocator,
+  findVisibleLocator,
+  getVisibleLoginForm,
+  ensureSignedIn,
+  waitForPrewarmWindow,
+  waitForRunPlan,
+  getRunPlanTargetMs,
+  waitForReservationForm,
+  fillReservationForm,
+  selectTrailheadByPriority,
+  buildDateButtonToken,
+  buildColumnHeaderLabel,
+};
 
 const isMainModule =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
