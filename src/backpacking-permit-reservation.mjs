@@ -22,6 +22,11 @@ const PREWARM_LEAD_MS = 90 * 1000;
 // then "N Group Members". Recreation.gov remembers the size within a browser
 // session, so a reload can show the second form.
 const GROUP_MEMBERS_BUTTON_NAME = /^(Add Group Members\.\.\.|\d+ Group Members?)$/;
+// For scheduled runs, keep refreshing the grid this long when the requested
+// entry points show no availability yet (the release may land a moment after
+// the scheduled start). The grid does not update on its own.
+const AVAILABILITY_RETRY_WINDOW_MS = 2 * 60 * 1000;
+const AVAILABILITY_RETRY_PAUSE_MS = 750;
 
 const FACILITIES = {
   yosemite: {
@@ -454,6 +459,18 @@ function formatInstantInTimeZone(date, timeZone) {
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function formatClockTime(date, timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
     hour12: true,
     timeZoneName: "short",
   }).format(date);
@@ -1804,6 +1821,15 @@ async function setGroupSize(page, groupSize) {
     name: GROUP_MEMBERS_BUTTON_NAME,
   });
 
+  // Recreation.gov remembers the size within a session; after a refresh the
+  // button already reads "N Group Members" and the dialog can be skipped.
+  const currentLabel = normalizeText(
+    await groupMembersButton.first().innerText({ timeout: 5000 }).catch(() => "")
+  );
+  if (currentLabel === `${groupSize} Group Members` || currentLabel === `${groupSize} Group Member`) {
+    return;
+  }
+
   await groupMembersButton.click();
   const peopleField = page.getByRole("textbox", {
     name: "Number of Peoples",
@@ -1916,6 +1942,40 @@ function findTrailheadRow(entryPointName, inventory, destination) {
 }
 
 async function selectTrailheadByPriority(page, request) {
+  const retryWindowMs =
+    request.runPlan?.mode === "later" ? AVAILABILITY_RETRY_WINDOW_MS : 0;
+  const deadline = Date.now() + retryWindowMs;
+  let attempt = 0;
+
+  while (true) {
+    attempt += 1;
+    try {
+      return await attemptTrailheadSelection(page, request);
+    } catch (error) {
+      if (!error.retryable || Date.now() >= deadline) {
+        if (error.retryable && attempt > 1) {
+          error.message += ` Refreshed the grid ${attempt - 1} time(s) over ${formatDuration(retryWindowMs)} without success.`;
+        }
+        throw error;
+      }
+    }
+
+    console.log(
+      `No availability yet for the requested entry points; refreshing the grid (attempt ${attempt + 1})...`
+    );
+    await sleep(AVAILABILITY_RETRY_PAUSE_MS);
+    await refreshAvailabilityPage(page, request);
+    await waitForAvailabilityShell(page);
+  }
+}
+
+function retryableError(message) {
+  const error = new Error(message);
+  error.retryable = true;
+  return error;
+}
+
+async function attemptTrailheadSelection(page, request) {
   await ensureAvailabilityPage(page, request);
   await prepareAvailabilityGrid(page, request);
   await ensureEntryDate(page, request.entryDate);
@@ -1994,7 +2054,7 @@ async function selectTrailheadByPriority(page, request) {
     );
   }
 
-  throw new Error(
+  throw retryableError(
     `None of the requested entry points had availability on ${request.entryDate}.`
   );
 }
@@ -2190,6 +2250,11 @@ function logWebsiteInteractionTiming(timing) {
     )}`
   );
   console.log(
+    `- Website entry began to trailhead selected: ${formatDuration(
+      timing.durationMs("websiteStart", "trailheadSelected")
+    )}`
+  );
+  console.log(
     `- Open reservation form: ${formatDuration(
       timing.durationMs("trailheadSelected", "detailsReady")
     )}`
@@ -2227,6 +2292,14 @@ export async function main() {
     timing.mark("signedIn");
     const selectedTrailhead = await selectTrailheadByPriority(page, request);
     timing.mark("trailheadSelected");
+    console.log(
+      `Trailhead selected ${formatDuration(
+        timing.durationMs("websiteStart", "trailheadSelected")
+      )} after website entry began, at ${formatClockTime(
+        new Date(),
+        request.runPlan?.timeZone ?? DEFAULT_RUN_TIME_ZONE
+      )}.`
+    );
     await continueToDetailsPage(page, request.account);
     timing.mark("detailsReady");
     await fillReservationForm(page, request);
