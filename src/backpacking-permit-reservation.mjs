@@ -553,6 +553,13 @@ function matchesExpectedUrl(currentUrl, expectedUrl) {
     }
 
     for (const [key, value] of expected.searchParams.entries()) {
+      // Recreation.gov rewrites the date query parameter to today's date when
+      // the page loads. The requested date is enforced by ensureEntryDate, so
+      // a differing date is not a reason to reload the page.
+      if (key === "date") {
+        continue;
+      }
+
       if (current.searchParams.get(key) !== value) {
         return false;
       }
@@ -1572,6 +1579,7 @@ async function ensureAvailabilityPage(page, request) {
 
   console.log("Opening the availability grid...");
   await page.goto(availabilityUrl, { waitUntil: "domcontentloaded" });
+  await waitForAvailabilityShell(page);
 }
 
 async function submitLoginIfVisible(page, account, reason = "Signing into Recreation.gov...") {
@@ -1740,9 +1748,14 @@ async function ensureEntryDate(page, entryDate) {
   console.log(`Setting entry date to ${entryDate}...`);
   const [year, month, day] = entryDate.split("-");
   const spinbuttons = page.getByRole("spinbutton");
-  const spinbuttonCount = await spinbuttons.count().catch(() => 0);
+  // The date fields are drawn by the client-side app a moment after the page
+  // loads, so poll for them rather than checking once.
+  const spinbuttonsReady = await waitForCondition(
+    async () => (await spinbuttons.count().catch(() => 0)) >= 3,
+    { timeoutMs: 15000 }
+  );
 
-  if (spinbuttonCount < 3) {
+  if (!spinbuttonsReady) {
     throw new Error("Unable to find the entry date controls.");
   }
 
