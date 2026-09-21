@@ -1577,15 +1577,28 @@ async function fillTextLikeField(page, fieldKey, value, { keepExisting = false }
     return "selected";
   }
 
-  if (keepExisting) {
-    const existing = normalizeText(await locator.inputValue().catch(() => ""));
-    if (existing) {
-      return "kept";
-    }
+  // Recreation.gov locks the permit holder's name and email to the account.
+  // A disabled or read-only field cannot be typed into, so leave it alone.
+  if (!(await locator.isEditable().catch(() => true))) {
+    return "locked";
+  }
+
+  const existing = normalizeText(await locator.inputValue().catch(() => ""));
+  if (existing && (keepExisting || existing === normalizeText(value))) {
+    return "kept";
   }
 
   await locator.fill(value);
   return "filled";
+}
+
+async function fillPermitHolderField(page, fieldKey, value) {
+  const result = await fillTextLikeField(page, fieldKey, value);
+  if (result === "locked") {
+    console.log(
+      `The ${FIELD_CONFIG[fieldKey].description} field is locked to your Recreation.gov account; leaving it as is.`
+    );
+  }
 }
 
 // Checks a checkbox or radio input. Recreation.gov hides the real input
@@ -2256,10 +2269,10 @@ async function fillReservationForm(page, request) {
     ].map((fieldKey) => resolveFieldLocator(page, fieldKey))
   );
 
-  await fillTextLikeField(page, "permitHolderFirstName", request.permitHolder.firstName);
-  await fillTextLikeField(page, "permitHolderLastName", request.permitHolder.lastName);
-  await fillTextLikeField(page, "permitHolderEmail", request.permitHolder.email);
-  await fillTextLikeField(page, "permitHolderPhone", request.permitHolder.phone);
+  await fillPermitHolderField(page, "permitHolderFirstName", request.permitHolder.firstName);
+  await fillPermitHolderField(page, "permitHolderLastName", request.permitHolder.lastName);
+  await fillPermitHolderField(page, "permitHolderEmail", request.permitHolder.email);
+  await fillPermitHolderField(page, "permitHolderPhone", request.permitHolder.phone);
   // Recreation.gov pre-fills a structured address (street, city, state, zip)
   // from the account. A single typed address line cannot be split reliably,
   // so keep a pre-filled street address rather than overwrite it.
@@ -2269,7 +2282,7 @@ async function fillReservationForm(page, request) {
     request.permitHolder.address,
     { keepExisting: true }
   );
-  if (addressResult === "kept") {
+  if (addressResult === "kept" || addressResult === "locked") {
     console.log("Address was already filled from your Recreation.gov account; leaving it unchanged.");
   } else if (addressResult === "filled") {
     console.log("Entered the address into the street address field; check city, state, and zip after handoff.");

@@ -86,7 +86,7 @@ When you run it this way, the program stores its working files in the folder you
 - Tries your entry point priorities in order for the requested entry date
 - Selects the first available entry point
 - If Recreation.gov asks for sign-in again after `Book Now`, submits the same login credentials automatically
-- Fills the reservation details form with your supplied permit-holder information
+- Fills the reservation details form with your supplied permit-holder information, except for fields Recreation.gov locks to your account (name and email) or has already filled (address), which it leaves as they are and says so
 - For Yosemite, applies the fixed values:
   - `Travel Method = Foot`
   - `Animals = No`
