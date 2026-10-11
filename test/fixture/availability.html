@@ -1,0 +1,108 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Fixture grid</title>
+<style>
+.hidden{display:none}.rec-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+[role=row]{display:flex}[role=gridcell],[role=columnheader]{width:90px;padding:4px;border:1px solid #ccc}
+.mobile{display:none}[role=spinbutton]{display:inline-block;min-width:24px;min-height:16px;border:1px solid #999}
+</style></head><body>
+<header><button aria-label="Sign Up or Log In" id="loginBtn">Sign Up / Log In</button></header>
+<div role="dialog" aria-label="Log In to Recreation.gov" id="loginDialog" class="hidden">
+  <label>Email (Required)<input type="email" id="email"></label>
+  <label>Password (Required)<input type="password" id="password"></label>
+  <button type="submit" id="loginSubmit">Log In</button>
+</div>
+<div class="mobile"><button>Add Group Members...</button><select id="permit-type"><option>Overnight</option></select></div>
+<div>
+  <span role="spinbutton" contenteditable id="m">10</span>/<span role="spinbutton" contenteditable id="d">01</span>/<span role="spinbutton" contenteditable id="y">2026</span>
+  <button id="addGroup">Add Group Members...</button>
+  <div id="groupPop" class="hidden"><label>Number of Peoples<input type="text" id="people"></label><button id="closePop">Close</button></div>
+</div>
+<div role="grid" id="grid">
+  <div role="row">
+    <div role="columnheader"><button>Entry Points</button></div>
+    <div role="columnheader"><span class="rec-sr-only">Thursday, October 1, 2026</span><span aria-hidden="true">Thu</span><span aria-hidden="true">1</span></div>
+    <div role="columnheader"><span class="rec-sr-only">Friday, October 2, 2026</span><span aria-hidden="true">Fri</span><span aria-hidden="true">2</span></div>
+  </div>
+  <div id="info"><h2>Information Required</h2><p>Please select a Group Size to view availability.</p></div>
+  <div id="rows"></div>
+</div>
+<button id="clear" class="hidden">Clear Dates that were selected</button>
+<button id="bookNow" disabled>Book Now</button>
+<script>
+// Query parameters select fixture behaviours that mimic Recreation.gov:
+//   delay=N         rows render N ms after the group size is set
+//   mode=today      the date param is rewritten to "today", the app shell draws late,
+//                   and typing a date into the spinbuttons updates the headers
+//   releaseAfter=N  availability appears only after N page loads (release-time retry)
+//   single=1        one "Paria Canyon Overnight" row instead of Yosemite entry points
+//   nr=1            the first date column is "not yet released"
+//   remembered=1    the group size is already remembered (button reads "2 Group Members")
+//   form=NAME       which form page Book Now navigates to (default form)
+const params = new URLSearchParams(location.search);
+sessionStorage.setItem('loads', String(Number(sessionStorage.getItem('loads') || 0) + 1));
+const TODAY_MODE = params.get('mode') === 'today';
+if (TODAY_MODE) {
+  params.set('date', '2026-09-21');
+  history.replaceState(null, '', location.pathname + '?' + params.toString());
+  document.body.style.visibility = 'hidden';
+}
+const setHeader = (iso) => {
+  const d = new Date(iso + 'T00:00:00Z');
+  const long = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  const short = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }).toUpperCase() + ' ' + d.getUTCDate();
+  document.querySelectorAll('[role="columnheader"]')[1].innerHTML = `<span class="rec-sr-only">${long}</span>`;
+  document.querySelectorAll('button.rec-availability-date[data-col="1"]:not([disabled])').forEach((b) => b.setAttribute('aria-label', short + '\nPeople:  3 out of 5'));
+  window.__dateToken = short;
+};
+const NAMES = [];
+if (params.get('single')) NAMES.push('Paria Canyon Overnight');
+else for (let i = 0; i < 56; i++) NAMES.push(['Alder Creek', 'Aspen Valley', 'Cathedral Lakes', 'Happy Isles to Little Yosemite Valley', 'Lyell Canyon', 'Mono Meadow', 'Sunrise Lakes'][i] || ('Trailhead ' + (i + 1)));
+function render() {
+  const rows = document.getElementById('rows'); rows.innerHTML = '';
+  const releaseAfter = Number(params.get('releaseAfter') || 0);
+  const loads = Number(sessionStorage.getItem('loads') || 0);
+  const nrFirst = params.get('nr') === '1';
+  NAMES.forEach((name, i) => {
+    // Rows 0 and 1 never have availability; the rest do once "released".
+    const avail = (i >= 2 || params.get('single')) && loads > releaseAfter;
+    const col1 = nrFirst
+      ? `<div role="gridcell" class="rec-grid-grid-cell not-yet-released"><button type="button" class="rec-availability-date" aria-label="This permit is not yet released (NR).  Click NR to learn more." data-i="${i}" data-col="1">NR</button></div>`
+      : `<div role="gridcell" class="rec-grid-grid-cell ${avail ? 'available' : 'unavailable'}"><button type="button" class="rec-availability-date" ${avail ? '' : 'disabled'} aria-label="${avail ? (window.__dateToken || 'THU 1') + '\nPeople:  3 out of 5' : 'No online reservations available'}" data-i="${i}" data-col="1">${avail ? 3 : 0}</button></div>`;
+    const col2 = `<div role="gridcell" class="rec-grid-grid-cell ${avail ? 'available' : 'unavailable'}"><button type="button" class="rec-availability-date" ${avail ? '' : 'disabled'} aria-label="${avail ? 'FRI 2\nPeople:  3 out of 5' : 'No online reservations available'}" data-i="${i}" data-col="2">${avail ? 3 : 0}</button></div>`;
+    rows.insertAdjacentHTML('beforeend', `<div role="row"><div role="gridcell" class="rec-grid-grid-cell"><p><button type="button" aria-label="${name}">${name}</button></p><p>Yosemite</p></div>` + col1 + col2 + `</div>`);
+  });
+}
+document.getElementById('loginBtn').onclick = () => document.getElementById('loginDialog').classList.remove('hidden');
+document.getElementById('loginSubmit').onclick = () => { setTimeout(() => { document.getElementById('loginDialog').classList.add('hidden'); document.getElementById('loginBtn').remove(); }, 300); };
+document.getElementById('addGroup').onclick = () => document.getElementById('groupPop').classList.remove('hidden');
+document.getElementById('closePop').onclick = () => {
+  document.getElementById('groupPop').classList.add('hidden');
+  if (Number(document.getElementById('people').value) > 0) {
+    const info = document.getElementById('info'); if (info) info.remove();
+    const delay = Number(params.get('delay') || 0);
+    if (delay === 0) render(); else setTimeout(render, delay);
+  }
+};
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button.rec-availability-date'); if (!b || b.disabled || b.innerText.trim() === 'NR') return;
+  window.__selected = b.dataset.i; window.__selectedCol = b.dataset.col;
+  setTimeout(() => { document.getElementById('bookNow').disabled = false; document.getElementById('clear').classList.remove('hidden'); }, 150);
+});
+document.getElementById('clear').onclick = () => { document.getElementById('bookNow').disabled = true; };
+document.getElementById('bookNow').onclick = () => { setTimeout(() => location.href = (params.get('form') || 'form') + '.html?from=' + window.__selected, 200); };
+window.addEventListener('DOMContentLoaded', () => {
+  if (TODAY_MODE) {
+    setHeader('2026-09-21');
+    for (const id of ['m', 'd', 'y']) document.getElementById(id).textContent = '';
+    document.getElementById('y').addEventListener('input', () => {
+      const m = +document.getElementById('m').textContent, dd = +document.getElementById('d').textContent, y = +document.getElementById('y').textContent;
+      if (m && dd && y > 2000) setTimeout(() => setHeader(`${y}-${String(m).padStart(2, '0')}-${String(dd).padStart(2, '0')}`), 300);
+    });
+    setTimeout(() => { document.body.style.visibility = 'visible'; }, 400);
+  }
+  if (params.get('remembered') === '1') {
+    document.getElementById('addGroup').textContent = '2 Group Members';
+    document.getElementById('info').remove();
+    render();
+  }
+});
+</script></body></html>

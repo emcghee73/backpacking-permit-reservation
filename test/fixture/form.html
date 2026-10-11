@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Fixture form (generic labels)</title><style>.hidden{display:none}</style></head><body>
+<div id="loading">Loading...</div>
+<form id="f" class="hidden">
+  <label>Permit Holder First Name<input name="permitHolder.firstName"></label>
+  <label>Permit Holder Last Name<input name="permitHolder.lastName"></label>
+  <label>Permit Holder Email<input type="email" name="permitHolder.email"></label>
+  <label>Permit Holder Phone<input type="tel" name="permitHolder.phone"></label>
+  <label>Address<input name="permitHolder.address"></label>
+  <label>Emergency Contact First Name<input name="emergency.firstName"></label>
+  <label>Emergency Contact Phone<input type="tel" name="emergency.phone"></label>
+  <label>Travel Method<select name="travelMethod"><option></option><option>Foot</option><option>Horse</option></select></label>
+  <label>Animals<select name="animals"><option></option><option>Yes</option><option>No</option></select></label>
+  <label>Issuing Station<select name="issuingStation"><option></option><option>Tuolumne Meadows Wilderness Center</option><option>Yosemite Valley</option></select></label>
+  <label>Late Arrival<select name="lateArrival"><option></option><option>Yes</option><option>No</option></select></label>
+  <label><input type="checkbox" name="needToKnow">Yes, I have read and agree to the Need to Know information.</label>
+</form>
+<script>setTimeout(() => { document.getElementById('loading').remove(); document.getElementById('f').classList.remove('hidden'); }, 700);</script>
+</body></html>

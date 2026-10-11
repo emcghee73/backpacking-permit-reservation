@@ -747,6 +747,39 @@ async function promptDate(question) {
   }
 }
 
+function parseDateList(value) {
+  const dates = [];
+  for (const item of value.split(",")) {
+    const date = normalizeText(item);
+    if (!date) {
+      continue;
+    }
+    if (!parseIsoDate(date)) {
+      return { error: `"${date}" is not a date in YYYY-MM-DD form.` };
+    }
+    if (!dates.includes(date)) {
+      dates.push(date);
+    }
+  }
+
+  if (dates.length === 0) {
+    return { error: "Enter at least one date." };
+  }
+
+  return { dates };
+}
+
+async function promptDates(question) {
+  while (true) {
+    const answer = await promptRequired(`${question} (comma-separated, YYYY-MM-DD)`);
+    const parsed = parseDateList(answer);
+    if (parsed.dates) {
+      return parsed.dates;
+    }
+    console.log(parsed.error);
+  }
+}
+
 async function promptTimeOfDay(question) {
   while (true) {
     const answer = await promptRequired(`${question} (HH:MM, 24-hour time)`);
@@ -928,15 +961,27 @@ function pickTrailheadDisplayName(rawRow, destination) {
   return "";
 }
 
-// Reads the name of every grid row in a single page evaluation. The previous
+// Reads every grid row (name plus the state of each date cell) and the
+// visible column headers in a single page evaluation. The previous
 // implementation made several Playwright round trips per row, which added
 // seconds on grids with 50+ entry points.
 async function readTrailheadRows(rowsLocator) {
   return await rowsLocator
     .evaluateAll((rowElements) => {
       const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+      const isShown = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
 
-      return rowElements.map((row) => {
+      const headers = Array.from(document.querySelectorAll('[role="columnheader"]'))
+        .filter(isShown)
+        .map((header) => {
+          const hidden = header.querySelector(".rec-sr-only");
+          return normalize(hidden ? hidden.textContent : header.innerText);
+        });
+
+      const rows = rowElements.map((row) => {
         const cells = Array.from(row.querySelectorAll('[role="gridcell"]'));
         if (cells.length === 0) {
           return null;
@@ -950,12 +995,58 @@ async function readTrailheadRows(rowsLocator) {
         const buttonText = nameButton && !ariaLabel ? normalize(nameButton.innerText) : "";
         const cellTexts =
           ariaLabel || buttonText ? [] : cells.map((cell) => normalize(cell.innerText));
+        const cellStates = cells.map((cell) => {
+          const button = cell.querySelector("button");
+          return {
+            classes: (cell.getAttribute("class") || "").split(/\s+/).filter(Boolean),
+            ariaLabel: button ? normalize(button.getAttribute("aria-label")) : "",
+            disabled: button ? button.disabled : true,
+            hasButton: Boolean(button),
+          };
+        });
 
-        return { ariaLabel, buttonText, cellTexts };
+        return { ariaLabel, buttonText, cellTexts, cellStates };
       });
+
+      return { headers, rows };
     })
-    .catch(() => []);
+    .catch(() => ({ headers: [], rows: [] }));
 }
+
+// Interprets a grid cell's state from the classes Recreation.gov puts on it.
+function classifyCellState(state) {
+  if (!state || !state.hasButton) {
+    return "missing";
+  }
+
+  const classes = state.classes;
+  if (classes.includes("not-yet-released") || /not yet released/i.test(state.ariaLabel)) {
+    return "notReleased";
+  }
+  if (classes.includes("in-station")) {
+    return "inStation";
+  }
+  if (classes.includes("lottery")) {
+    return "lottery";
+  }
+  if (classes.includes("unavailable") || state.disabled) {
+    return "unavailable";
+  }
+  if (classes.includes("available") || /people:/i.test(state.ariaLabel)) {
+    return "available";
+  }
+
+  return "unknown";
+}
+
+const CELL_STATE_DESCRIPTIONS = {
+  notReleased: "is not yet released for booking",
+  inStation: "is only issued in-station (not bookable online)",
+  lottery: "is only available by lottery",
+  unavailable: "has no availability",
+  missing: "has no cell",
+  unknown: "is not bookable",
+};
 
 async function promptDestination(defaultKey = DESTINATION_ORDER[0]) {
   const destinations = DESTINATION_ORDER.map((key) => FACILITIES[key]);
@@ -1056,10 +1147,10 @@ function buildRequestReviewItems(request) {
       },
     },
     {
-      label: "Entry date",
-      display: () => request.entryDate,
+      label: "Entry dates in priority order",
+      display: () => request.entryDates.join(", "),
       edit: async () => {
-        request.entryDate = await promptDate("Entry date");
+        request.entryDates = await promptDates("Entry dates in priority order");
       },
     },
     {
@@ -1221,7 +1312,7 @@ async function collectPermitRequest() {
   }
 
   const groupSize = await promptPositiveInteger("Number of people on the permit");
-  const entryDate = await promptDate("Entry date");
+  const entryDates = await promptDates("Entry dates in priority order");
   const trailheads = trailheadsForDestination(destination) ?? (await promptTrailheads());
 
   const permitHolder = {
@@ -1239,7 +1330,7 @@ async function collectPermitRequest() {
       password: accountPassword,
     },
     groupSize,
-    entryDate,
+    entryDates,
     trailheads,
     permitHolder,
   };
@@ -1857,7 +1948,7 @@ async function getVisibleLoginForm(page) {
 }
 
 async function ensureAvailabilityPage(page, request) {
-  const availabilityUrl = request.destination.buildAvailabilityUrl(request.entryDate);
+  const availabilityUrl = request.destination.buildAvailabilityUrl(request.entryDates[0]);
   if (matchesExpectedUrl(page.url(), availabilityUrl)) {
     return;
   }
@@ -1915,7 +2006,7 @@ async function waitForAvailabilityShell(page) {
 
 async function refreshAvailabilityPage(page, request) {
   console.log("Reloading the availability grid for fresh data...");
-  await page.goto(request.destination.buildAvailabilityUrl(request.entryDate), {
+  await page.goto(request.destination.buildAvailabilityUrl(request.entryDates[0]), {
     waitUntil: "domcontentloaded",
   });
 }
@@ -2070,14 +2161,18 @@ async function ensureEntryDate(page, entryDate) {
   throw new Error(`The availability grid did not update to show ${headerLabel}.`);
 }
 
-async function getTrailheadRowInventory(page, destination) {
+async function getTrailheadRowInventory(page, destination, entryDate = null) {
   const rows = page.locator('[role="row"]');
   // The grid fetches its rows after the group size is set; give the first
   // data row a moment to attach so we do not read an empty grid.
   await waitForLocatorPresence(rows.filter({ has: page.locator('[role="gridcell"]') }), {
     timeoutMs: 10000,
   });
-  const rawRows = await readTrailheadRows(rows);
+  const { headers, rows: rawRows } = await readTrailheadRows(rows);
+  const headerLabel = entryDate ? buildColumnHeaderLabel(entryDate) : null;
+  const columnIndex = headerLabel
+    ? headers.findIndex((header) => header.startsWith(headerLabel))
+    : -1;
   const inventory = [];
 
   for (const [index, rawRow] of rawRows.entries()) {
@@ -2092,13 +2187,21 @@ async function getTrailheadRowInventory(page, destination) {
       continue;
     }
 
+    const row = rows.nth(index);
+    const cellState = columnIndex >= 0 ? rawRow.cellStates[columnIndex] : null;
     inventory.push({
       displayName,
       normalizedName,
-      row: rows.nth(index),
+      row,
+      cellState: classifyCellState(cellState),
+      cellButton:
+        columnIndex >= 0
+          ? row.locator('[role="gridcell"]').nth(columnIndex).locator("button")
+          : null,
     });
   }
 
+  inventory.columnIndex = columnIndex;
   return inventory;
 }
 
@@ -2140,7 +2243,7 @@ async function selectTrailheadByPriority(page, request) {
     }
 
     console.log(
-      `No availability yet for the requested entry points; refreshing the grid (attempt ${attempt + 1})...`
+      `Nothing bookable yet for the requested entry points and dates; refreshing the grid (attempt ${attempt + 1})...`
     );
     await sleep(AVAILABILITY_RETRY_PAUSE_MS);
     await refreshAvailabilityPage(page, request);
@@ -2157,73 +2260,81 @@ function retryableError(message) {
 async function attemptTrailheadSelection(page, request) {
   await ensureAvailabilityPage(page, request);
   await prepareAvailabilityGrid(page, request);
-  await ensureEntryDate(page, request.entryDate);
+  await ensureEntryDate(page, request.entryDates[0]);
   await setGroupSize(page, request.groupSize);
-  await ensureEntryDate(page, request.entryDate);
 
-  const trailheadInventory = await getTrailheadRowInventory(
-    page,
-    request.destination
-  );
-  const dateToken = buildDateButtonToken(request.entryDate);
   const bookNowEnabledButton = page.getByRole("button", {
     name: "Book Now",
     exact: true,
     disabled: false,
   });
+  const clearDatesButton = page.getByRole("button", {
+    name: "Clear Dates that were selected",
+    exact: true,
+  });
   let matchedAtLeastOneTrailhead = false;
+  const outcomes = [];
 
-  for (const trailhead of request.trailheads) {
-    console.log(`Checking entry point ${trailhead.name}...`);
-    const matchedTrailhead = findTrailheadRow(
-      trailhead.name,
-      trailheadInventory,
-      request.destination
+  // Dates in priority order; within each date, entry points in priority order.
+  for (const entryDate of request.entryDates) {
+    await ensureEntryDate(page, entryDate);
+    const trailheadInventory = await getTrailheadRowInventory(
+      page,
+      request.destination,
+      entryDate
     );
-    if (!matchedTrailhead) {
-      console.log(`Entry point ${trailhead.name} was not present in the current table view.`);
-      continue;
-    }
-    matchedAtLeastOneTrailhead = true;
 
-    const row = matchedTrailhead.row;
-    const availabilityButton = row.getByRole("button", {
-      name: dateToken,
-      exact: false,
-    });
-    const buttonCount = await availabilityButton.count().catch(() => 0);
-    if (buttonCount !== 1) {
-      console.log(`Entry point ${trailhead.name} does not expose a selectable cell for ${request.entryDate}.`);
+    if (trailheadInventory.columnIndex < 0) {
+      console.log(`The availability grid is not showing ${entryDate}; skipping that date.`);
+      outcomes.push(`${entryDate}: the grid did not show this date`);
       continue;
     }
 
-    if (!(await availabilityButton.isEnabled().catch(() => false))) {
-      console.log(`Entry point ${trailhead.name} is visible but not bookable for ${request.entryDate}.`);
-      continue;
-    }
+    for (const trailhead of request.trailheads) {
+      console.log(`Checking entry point ${trailhead.name} for ${entryDate}...`);
+      const matchedTrailhead = findTrailheadRow(
+        trailhead.name,
+        trailheadInventory,
+        request.destination
+      );
+      if (!matchedTrailhead) {
+        console.log(`Entry point ${trailhead.name} was not present in the current table view.`);
+        outcomes.push(`${entryDate}: ${trailhead.name} was not found in the grid`);
+        continue;
+      }
+      matchedAtLeastOneTrailhead = true;
 
-    await availabilityButton.click();
+      const label = matchedTrailhead.displayName;
+      if (matchedTrailhead.cellState !== "available") {
+        const description =
+          CELL_STATE_DESCRIPTIONS[matchedTrailhead.cellState] ?? CELL_STATE_DESCRIPTIONS.unknown;
+        console.log(`Entry point ${label} ${description} on ${entryDate}.`);
+        outcomes.push(`${entryDate}: ${label} ${description}`);
+        continue;
+      }
 
-    const enabled = await waitForLocatorPresence(bookNowEnabledButton, { timeoutMs: 5000 });
-    if (enabled) {
-      console.log(`Selected entry point ${matchedTrailhead.displayName}.`);
-      return {
-        ...trailhead,
-        displayName: matchedTrailhead.displayName,
-      };
-    }
+      await matchedTrailhead.cellButton.click();
 
-    const clearDatesButton = page.getByRole("button", {
-      name: "Clear Dates that were selected",
-      exact: true,
-    });
+      const enabled = await waitForLocatorPresence(bookNowEnabledButton, { timeoutMs: 5000 });
+      if (enabled) {
+        console.log(`Selected entry point ${label} for ${entryDate}.`);
+        return {
+          ...trailhead,
+          displayName: label,
+          entryDate,
+        };
+      }
 
-    if (await isVisible(clearDatesButton)) {
-      await clearDatesButton.click().catch(() => {});
-      await waitForLocatorPresence(bookNowEnabledButton, {
-        timeoutMs: 1500,
-        present: false,
-      });
+      console.log(`Entry point ${label} looked available on ${entryDate}, but Book Now did not enable.`);
+      outcomes.push(`${entryDate}: ${label} looked available but could not be selected`);
+
+      if (await isVisible(clearDatesButton)) {
+        await clearDatesButton.click().catch(() => {});
+        await waitForLocatorPresence(bookNowEnabledButton, {
+          timeoutMs: 1500,
+          present: false,
+        });
+      }
     }
   }
 
@@ -2233,8 +2344,11 @@ async function attemptTrailheadSelection(page, request) {
     );
   }
 
+  const notReleased = outcomes.some((outcome) => outcome.includes("not yet released"));
   throw retryableError(
-    `None of the requested entry points had availability on ${request.entryDate}.`
+    `None of the requested entry points could be booked on the requested dates.${
+      notReleased ? " At least one is not yet released for booking." : ""
+    }\n  - ${outcomes.join("\n  - ")}`
   );
 }
 
@@ -2490,7 +2604,9 @@ export async function main() {
     timing.mark("handoffReady");
 
     console.log("");
-    console.log(`Selected entry point: ${selectedTrailhead.displayName ?? selectedTrailhead.name}`);
+    console.log(
+      `Selected entry point: ${selectedTrailhead.displayName ?? selectedTrailhead.name} for ${selectedTrailhead.entryDate ?? request.entryDates[0]}`
+    );
     console.log(`Handoff URL: ${handoffUrl}`);
     console.log(`Saved handoff URL to ${HANDOFF_FILE}`);
     logWebsiteInteractionTiming(timing);
@@ -2537,6 +2653,8 @@ export const internals = {
   selectTrailheadByPriority,
   buildDateButtonToken,
   buildColumnHeaderLabel,
+  parseDateList,
+  classifyCellState,
 };
 
 const isMainModule =

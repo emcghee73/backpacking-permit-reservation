@@ -6,3 +6,5 @@
 !src/
 src/*
 !src/backpacking-permit-reservation.mjs
+!test/
+!test/**

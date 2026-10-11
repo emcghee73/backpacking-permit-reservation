@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Fixture form (mirrors Recreation.gov)</title>
+<style>.hidden{display:none}.rec-input-hide{position:absolute;opacity:0;width:1px;height:1px;overflow:hidden}.rec-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+label.rec-label-radio{display:inline-block;padding:6px 12px;border:1px solid #888;margin:4px}</style></head><body>
+<div id="loading">Loading...</div>
+<form id="f" class="hidden">
+  <h2>Permit Holder</h2>
+  <label for="first_name">First Name<abbr><span aria-hidden="true">*</span><span class="rec-sr-only"> (Required) </span></abbr></label><input type="text" id="first_name" disabled value="Account">
+  <label for="last_name">Last Name<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><input type="text" id="last_name" disabled value="Holder">
+  <label for="email">Email<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><input type="email" id="email" disabled value="account@example.com">
+  <label for="cell_phone_req">Phone Number<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><input type="text" id="cell_phone_req" value="5550000000">
+  <h2>Address</h2>
+  <label for="country">Country</label><select id="country"><option>Choose a country ...</option><option selected>United States</option></select>
+  <label for="address1">Street Address<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><input type="text" id="address1" value="1 Main St">
+  <label for="suite-number">Apt or Suite Number</label><input type="text" id="suite-number" value="">
+  <label for="city">City / Town</label><input type="text" id="city" value="Springfield">
+  <label for="state">State / Province</label><select id="state"><option>Choose a state ...</option><option selected>California</option></select>
+  <label for="zip_code">Zip / Postal Code</label><input type="text" id="zip_code" value="90000">
+  <label for="save-leader-checkbox">Save changes to my account</label><input type="checkbox" id="save-leader-checkbox">
+  <h2>Emergency Contact</h2>
+  <label for="emergency-contact-firstname">First Name</label><input type="text" id="emergency-contact-firstname" value="">
+  <label for="emergency-contact-lastname">Last Name</label><input type="text" id="emergency-contact-lastname" value="">
+  <label for="emergency-contact-phone-num">Phone Number</label><input type="text" id="emergency-contact-phone-num" value="">
+  <h2>Trip Itinerary</h2>
+  <label for="entry-point">Entry Point</label><input type="text" id="entry-point" value="May Lake">
+  <label for="input-takeout-point">Exit Point<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><input type="text" id="input-takeout-point" role="combobox" placeholder="Type to select from the list...">
+  <label for="comments-text-area-1">Comments<abbr><span class="rec-sr-only"> (Required) </span></abbr></label><textarea id="comments-text-area-1"></textarea>
+  <h2>Travel Method</h2>
+  <label for="travel-method">Travel Method<abbr><span class="rec-sr-only"> (Required) </span></abbr></label>
+  <select name="travel-method" id="travel-method"><option>Select Option</option><option>Foot</option><option>Ski or Snow Shoe</option><option>With Stock</option></select>
+  <h2>Animals</h2>
+  <div role="group" aria-label="Are you bringing animals on your trip? (Required)"><div>Are you bringing animals on your trip?</div>
+    <label for="bringing-animal-yes" class="rec-label-radio"><input type="radio" id="bringing-animal-yes" class="rec-input-hide" name="bringing-animal-radio-group" value="yes"><span>Yes</span></label>
+    <label for="bringing-animal-no" class="rec-label-radio"><input type="radio" id="bringing-animal-no" class="rec-input-hide" name="bringing-animal-radio-group" value="no"><span>No</span></label>
+  </div>
+  <h2>Issuing Station</h2>
+  <label for="issue-station">Station Location</label>
+  <select name="issue-station" id="issue-station"><option>Select Option</option><option>Yosemite Valley Wilderness Center</option><option>Tuolumne Meadows Wilderness Center</option><option>Big Oak Flat Information Center</option></select>
+  <fieldset><legend>Late Arrival</legend><div role="group" aria-label="Late Arrival (Required)">
+    <label for="late-arrival-yes" class="rec-label-radio"><input type="radio" id="late-arrival-yes" class="rec-input-hide" name="late-arrival-with-validation" value="yes"><span>Yes</span></label>
+    <label for="late-arrival-no" class="rec-label-radio"><input type="radio" id="late-arrival-no" class="rec-input-hide" name="late-arrival-with-validation" value="no"><span>No</span></label>
+  </div></fieldset>
+  <h2>Need to Know</h2>
+  <label for="need-to-know" class="rec-label-radio"><input type="checkbox" id="need-to-know" class="rec-input-hide" name="needToKnowCheckbox" value="checked"><span>Yes, I have read and agree to the Need to Know information.<abbr><span class="rec-sr-only"> (Required) </span></abbr></span></label>
+</form>
+<script>setTimeout(() => { document.getElementById('loading').remove(); document.getElementById('f').classList.remove('hidden'); }, 700);</script>
+</body></html>
