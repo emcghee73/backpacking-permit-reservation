@@ -69,6 +69,7 @@ When you run it this way, the program stores its working files in the folder you
 - Group size
 - Entry dates in priority order, comma-separated, each in `YYYY-MM-DD` format
 - Entry point names in priority order (skipped for Paria Canyon, which has a single permit area)
+- Whether to prioritize dates or trailheads, asked when there are several of each: `dates` tries every entry point for one date before moving to the next date; `trailheads` tries every date for one entry point before moving to the next entry point
 - Permit-holder first name
 - Permit-holder last name
 - Permit-holder email
@@ -83,7 +84,7 @@ When you run it this way, the program stores its working files in the folder you
 - Opens the correct Recreation.gov permit flow for Yosemite, Inyo, or Paria Canyon
 - For Inyo, selects `No` for the commercial-guided-trip question and `Overnight` for permit type before using the availability grid
 - Sets the requested group size
-- Tries your entry dates in priority order and, within each date, your entry point priorities in order
+- Tries every date and entry point combination in the order you chose: dates first (each date, all entry points) or trailheads first (each entry point, all dates)
 - Selects the first bookable combination and reports why each earlier one was skipped: not yet released, no availability, in-station only, or lottery only
 - If Recreation.gov asks for sign-in again after `Book Now`, submits the same login credentials automatically
 - Fills the reservation details form with your supplied permit-holder information, except for fields Recreation.gov locks to your account (name and email) or has already filled (address), which it leaves as they are and says so

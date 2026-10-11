@@ -36,6 +36,8 @@
 //   single=1        one "Paria Canyon Overnight" row instead of Yosemite entry points
 //   nr=1            the first date column is "not yet released"
 //   remembered=1    the group size is already remembered (button reads "2 Group Members")
+//   col1Rows=a,b    row indexes available in the first date column (overrides the default rule)
+//   col2Rows=a,b    row indexes available in the second date column
 //   form=NAME       which form page Book Now navigates to (default form)
 const params = new URLSearchParams(location.search);
 sessionStorage.setItem('loads', String(Number(sessionStorage.getItem('loads') || 0) + 1));
@@ -63,11 +65,14 @@ function render() {
   const nrFirst = params.get('nr') === '1';
   NAMES.forEach((name, i) => {
     // Rows 0 and 1 never have availability; the rest do once "released".
-    const avail = (i >= 2 || params.get('single')) && loads > releaseAfter;
+    const released = loads > releaseAfter;
+    const listed = (key) => params.get(key) ? params.get(key).split(',').map(Number) : null;
+    const avail = (listed('col1Rows') ? listed('col1Rows').includes(i) : (i >= 2 || params.get('single'))) && released;
+    const avail2 = (listed('col2Rows') ? listed('col2Rows').includes(i) : (i >= 2 || params.get('single'))) && released;
     const col1 = nrFirst
       ? `<div role="gridcell" class="rec-grid-grid-cell not-yet-released"><button type="button" class="rec-availability-date" aria-label="This permit is not yet released (NR).  Click NR to learn more." data-i="${i}" data-col="1">NR</button></div>`
       : `<div role="gridcell" class="rec-grid-grid-cell ${avail ? 'available' : 'unavailable'}"><button type="button" class="rec-availability-date" ${avail ? '' : 'disabled'} aria-label="${avail ? (window.__dateToken || 'THU 1') + '\nPeople:  3 out of 5' : 'No online reservations available'}" data-i="${i}" data-col="1">${avail ? 3 : 0}</button></div>`;
-    const col2 = `<div role="gridcell" class="rec-grid-grid-cell ${avail ? 'available' : 'unavailable'}"><button type="button" class="rec-availability-date" ${avail ? '' : 'disabled'} aria-label="${avail ? 'FRI 2\nPeople:  3 out of 5' : 'No online reservations available'}" data-i="${i}" data-col="2">${avail ? 3 : 0}</button></div>`;
+    const col2 = `<div role="gridcell" class="rec-grid-grid-cell ${avail2 ? 'available' : 'unavailable'}"><button type="button" class="rec-availability-date" ${avail2 ? '' : 'disabled'} aria-label="${avail2 ? 'FRI 2\nPeople:  3 out of 5' : 'No online reservations available'}" data-i="${i}" data-col="2">${avail2 ? 3 : 0}</button></div>`;
     rows.insertAdjacentHTML('beforeend', `<div role="row"><div role="gridcell" class="rec-grid-grid-cell"><p><button type="button" aria-label="${name}">${name}</button></p><p>Yosemite</p></div>` + col1 + col2 + `</div>`);
   });
 }

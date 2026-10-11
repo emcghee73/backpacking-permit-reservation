@@ -37,6 +37,9 @@ const SCENARIOS = [
   { name: "group size remembered by the site", params: { form: "form-real", remembered: 1 }, groupSize: 2, expectForm: realFormValues() },
   { name: "Paria Canyon single row", params: { form: "form-real", single: 1 }, destination: "paria", expectName: "Paria Canyon Overnight", expectRow: "0", expectForm: realFormValues({ "issue-station": "Select Option" }) },
   { name: "first date not yet released, second date booked", params: { form: "form-real", nr: 1 }, entryDates: ["2026-10-01", "2026-10-02"], expectDate: "2026-10-02", expectCol: "2", expectForm: realFormValues() },
+  // Lyell Canyon (row 4) is open on the first date only; Cathedral Lakes (row 2) on the second date only.
+  { name: "dates first: takes Lyell on date 1", params: { form: "form-real", col1Rows: "4", col2Rows: "2" }, entryDates: ["2026-10-01", "2026-10-02"], trailheads: ["Cathedral Lakes", "Lyell Canyon"], priority: "dates", expectName: "Lyell Canyon", expectRow: "4", expectDate: "2026-10-01", expectCol: "1", expectForm: realFormValues() },
+  { name: "trailheads first: takes Cathedral on date 2", params: { form: "form-real", col1Rows: "4", col2Rows: "2" }, entryDates: ["2026-10-01", "2026-10-02"], trailheads: ["Cathedral Lakes", "Lyell Canyon"], priority: "trailheads", expectName: "Cathedral Lakes", expectRow: "2", expectDate: "2026-10-02", expectCol: "2", expectForm: realFormValues() },
 ];
 
 async function runScenario(scenario) {
@@ -47,7 +50,8 @@ async function runScenario(scenario) {
     account: { email: "user@example.com", password: "hunter2" },
     groupSize: scenario.groupSize ?? 3,
     entryDates: scenario.entryDates ?? ["2026-10-01"],
-    trailheads: destination.fixedTrailheads ?? [{ name: "Aspen Valley" }, { name: "Cathedral Lakes Yosemite" }, { name: "Lyell Canyon" }],
+    trailheads: destination.fixedTrailheads ?? (scenario.trailheads ?? ["Aspen Valley", "Cathedral Lakes Yosemite", "Lyell Canyon"]).map((name) => ({ name })),
+    priority: scenario.priority ?? "dates",
     permitHolder: { firstName: "Pat", lastName: "Hiker", email: "pat@example.com", phone: "5551234567", address: "1 Trail Rd" },
     runPlan: scenario.runPlan,
   };

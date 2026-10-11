@@ -1075,6 +1075,25 @@ async function promptDestination(defaultKey = DESTINATION_ORDER[0]) {
   }
 }
 
+const PRIORITY_OPTIONS = ["dates", "trailheads"];
+
+function describePriority(priority) {
+  return priority === "trailheads"
+    ? "trailheads first (every date for one entry point, then the next entry point)"
+    : "dates first (every entry point for one date, then the next date)";
+}
+
+function priorityChoiceApplies(request) {
+  return request.entryDates.length > 1 && request.trailheads.length > 1;
+}
+
+async function promptPriority(defaultValue = "dates") {
+  console.log("Prioritize dates or trailheads?");
+  console.log("  dates: try every entry point for your first date before moving to the next date");
+  console.log("  trailheads: try every date for your first entry point before moving to the next entry point");
+  return await promptChoice("Prioritize", PRIORITY_OPTIONS, defaultValue);
+}
+
 function trailheadsForDestination(destination) {
   return destination.fixedTrailheads
     ? destination.fixedTrailheads.map((trailhead) => ({ ...trailhead }))
@@ -1167,6 +1186,16 @@ function buildRequestReviewItems(request) {
           return;
         }
         request.trailheads = await promptTrailheads();
+      },
+    },
+    {
+      label: "Prioritize",
+      display: () =>
+        priorityChoiceApplies(request)
+          ? describePriority(request.priority)
+          : `${describePriority(request.priority)} (only matters with several dates and entry points)`,
+      edit: async () => {
+        request.priority = await promptPriority(request.priority);
       },
     },
     {
@@ -1314,6 +1343,8 @@ async function collectPermitRequest() {
   const groupSize = await promptPositiveInteger("Number of people on the permit");
   const entryDates = await promptDates("Entry dates in priority order");
   const trailheads = trailheadsForDestination(destination) ?? (await promptTrailheads());
+  const priority =
+    entryDates.length > 1 && trailheads.length > 1 ? await promptPriority() : "dates";
 
   const permitHolder = {
     firstName: await promptRequired("Permit holder first name"),
@@ -1332,6 +1363,7 @@ async function collectPermitRequest() {
     groupSize,
     entryDates,
     trailheads,
+    priority,
     permitHolder,
   };
 
@@ -2127,7 +2159,7 @@ async function ensureEntryDate(page, entryDate) {
   });
 
   if ((await matchingHeader.count().catch(() => 0)) > 0) {
-    return;
+    return false;
   }
 
   console.log(`Setting entry date to ${entryDate}...`);
@@ -2155,7 +2187,7 @@ async function ensureEntryDate(page, entryDate) {
 
   const updated = await waitForLocatorPresence(matchingHeader, { timeoutMs: 15000 });
   if (updated) {
-    return;
+    return true;
   }
 
   throw new Error(`The availability grid did not update to show ${headerLabel}.`);
@@ -2275,22 +2307,61 @@ async function attemptTrailheadSelection(page, request) {
   let matchedAtLeastOneTrailhead = false;
   const outcomes = [];
 
-  // Dates in priority order; within each date, entry points in priority order.
-  for (const entryDate of request.entryDates) {
-    await ensureEntryDate(page, entryDate);
-    const trailheadInventory = await getTrailheadRowInventory(
-      page,
-      request.destination,
-      entryDate
-    );
+  // Build the (date, entry point) combinations in the order the user chose:
+  // dates first (every entry point for a date, then the next date) or
+  // trailheads first (every date for an entry point, then the next one).
+  const combinations = [];
+  if (request.priority === "trailheads") {
+    for (const trailhead of request.trailheads) {
+      for (const entryDate of request.entryDates) {
+        combinations.push({ entryDate, trailhead });
+      }
+    }
+  } else {
+    for (const entryDate of request.entryDates) {
+      for (const trailhead of request.trailheads) {
+        combinations.push({ entryDate, trailhead });
+      }
+    }
+  }
 
-    if (trailheadInventory.columnIndex < 0) {
+  // The grid shows several dates at once, so one read covers every date in
+  // the visible window. It is re-read only when a date outside the window
+  // has to be typed in, which re-renders the grid.
+  const inventoryByDate = new Map();
+  const datesNotShown = new Set();
+  const loadInventory = async (entryDate) => {
+    if (inventoryByDate.has(entryDate)) {
+      return inventoryByDate.get(entryDate);
+    }
+    if (datesNotShown.has(entryDate)) {
+      return null;
+    }
+
+    const typedNewDate = await ensureEntryDate(page, entryDate);
+    if (typedNewDate) {
+      inventoryByDate.clear();
+    }
+
+    const inventory = await getTrailheadRowInventory(page, request.destination, entryDate);
+    if (inventory.columnIndex < 0) {
       console.log(`The availability grid is not showing ${entryDate}; skipping that date.`);
       outcomes.push(`${entryDate}: the grid did not show this date`);
+      datesNotShown.add(entryDate);
+      return null;
+    }
+
+    inventoryByDate.set(entryDate, inventory);
+    return inventory;
+  };
+
+  for (const { entryDate, trailhead } of combinations) {
+    const trailheadInventory = await loadInventory(entryDate);
+    if (!trailheadInventory) {
       continue;
     }
 
-    for (const trailhead of request.trailheads) {
+    {
       console.log(`Checking entry point ${trailhead.name} for ${entryDate}...`);
       const matchedTrailhead = findTrailheadRow(
         trailhead.name,
@@ -2655,6 +2726,7 @@ export const internals = {
   buildColumnHeaderLabel,
   parseDateList,
   classifyCellState,
+  describePriority,
 };
 
 const isMainModule =
